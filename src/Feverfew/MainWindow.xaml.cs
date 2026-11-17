@@ -71,13 +71,20 @@ namespace Feverfew
             RepairPage.Visibility = sender == NavRepair ? Visibility.Visible : Visibility.Collapsed;
             GamingPage.Visibility = sender == NavGaming ? Visibility.Visible : Visibility.Collapsed;
             UpdatesPage.Visibility = sender == NavUpdates ? Visibility.Visible : Visibility.Collapsed;
-            if (sender == NavGaming) RefreshGamingPage();
+            if (sender == NavGaming) RefreshPage(Fixes.Gaming, true);
+            if (sender == NavRepair) RefreshPage(Fixes.All, false);
+        }
+
+        private async void RefreshPage(Fix[] page, bool tips)
+        {
+            await RefreshStatusLines(page);
+            if (tips) await LoadGraphicsTips();
         }
 
         // Re-read on every visit, so a change made in an administrator window shows when the user comes back.
-        private async void RefreshGamingPage()
+        private async Task RefreshStatusLines(Fix[] page)
         {
-            foreach (var pair in statusLines)
+            foreach (var pair in statusLines.Where(p => page.Contains(p.Key)).ToList())
             {
                 var fix = pair.Key;
                 var line = pair.Value;
@@ -87,7 +94,10 @@ namespace Feverfew
                     catch (Exception) { return "Couldn't read the current setting"; }
                 });
             }
+        }
 
+        private async Task LoadGraphicsTips()
+        {
             if (tipsLoaded) return;
             tipsLoaded = true;
             try

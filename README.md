@@ -29,6 +29,7 @@ Reports are saved in `Feverfew Reports` in your Documents folder.
 | Crashes | Blue screen stop codes, repeated stop codes, the time of each unexpected shutdown, drivers logging large numbers of errors, hardware (WHEA) errors, disk errors, program crashes, last 30 days of event log errors |
 | Network | Adapters, addresses, DNS, proxy, router, internet and name lookup tests |
 | Gaming | Power plan, Game Mode, background recording, GPU scheduling, memory integrity, connection type, latency, jitter and packet loss, TCP and network adapter settings, NVIDIA power, PCIe and Resizable BAR details, AMD driver details, refresh rate |
+| AMD drive writes | Whether AMD's driver is constantly rewriting a file on the Windows drive (a known bug fixed in AMD Software 26.11.1), its write rate, and an estimate of what it has written to each drive and how much SSD wear that caused |
 | Battery | Charge, wear, cycles (laptops) |
 | Windows 11 | Readiness for each hardware requirement, except Microsoft's supported CPU list |
 
@@ -55,6 +56,7 @@ The report comes as an `.html` file to read and a `.json` file with the same con
 | Clear the DNS cache | `ipconfig /flushdns` |
 | Reset network settings | `netsh winsock reset`, `netsh int ip reset` |
 | Reset Windows Update | Stops its services and renames its cache folders |
+| Stop AMD's constant drive writes | `icacls` denies Windows' SYSTEM account write access to the one file AMD's External Events Utility keeps copying over. Undo removes it. |
 
 ## Gaming
 

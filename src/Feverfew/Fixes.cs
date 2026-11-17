@@ -56,7 +56,12 @@ namespace Feverfew
             new Fix { Name = "Reset network settings", When = "Network problems that survive a router restart.",
                 Command = "netsh winsock reset & netsh int ip reset", Caution = "You must restart afterwards, and any static IP address may be lost. VPN software may need reinstalling." },
             new Fix { Name = "Reset Windows Update", When = "Updates keep failing or get stuck.",
-                Command = ResetWindowsUpdate, Caution = "Windows Update stops briefly, its cache is renamed, and the list of past updates may appear empty." }
+                Command = ResetWindowsUpdate, Caution = "Windows Update stops briefly, its cache is renamed, and the list of past updates may appear empty." },
+            new Fix { Name = "Stop AMD's constant drive writes", When = "The scan reports that the AMD graphics driver is writing to the drive nonstop. AMD Software 26.11.1 fixes this, so updating is better. Undo removes the block.",
+                Command = "icacls " + Collectors.AmdWritesCollector.CopyPathForCommands + " /deny *S-1-5-18:(WD,AD,WEA,WA,DE)",
+                Undo = "icacls " + Collectors.AmdWritesCollector.CopyPathForCommands + " /remove:d *S-1-5-18",
+                Caution = "This stops Windows' SYSTEM account from overwriting the copy of atieclxx.exe that AMD's External Events Utility keeps making. The utility keeps running, so FreeSync and hotkeys still work. Use Undo after updating to AMD Software 26.11.1 or later.",
+                Status = Collectors.AmdWritesCollector.Status }
         };
 
         private const string GameBar = @"HKCU\Software\Microsoft\GameBar";
@@ -94,8 +99,8 @@ namespace Feverfew
         public static void AddToReport(Report r)
         {
             var s = r.NewSection("Typical fixes");
-            var t = s.Table("Commands to run from an administrator prompt", "Fix", "When to use it", "Command", "Caution");
-            foreach (var f in All) t.Rows.Add(new[] { f.Name, f.When, f.Command, f.Caution ?? "" });
+            var t = s.Table("Commands to run from an administrator prompt", "Fix", "When to use it", "Command", "Undo command", "Caution");
+            foreach (var f in All) t.Rows.Add(new[] { f.Name, f.When, f.Command, f.Undo ?? "", f.Caution ?? "" });
             var g = s.Table("Gaming optimisations", "Optimisation", "When to use it", "Command", "Undo command", "Caution");
             foreach (var f in Gaming) g.Rows.Add(new[] { f.Name, f.When, f.Command, f.Undo ?? "", f.Caution ?? "" });
             s.Note("Feverfew doesn't run any of these during a scan. To run one, open Repair tools or Gaming in Feverfew.");

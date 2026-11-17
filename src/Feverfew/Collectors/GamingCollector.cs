@@ -276,24 +276,45 @@ namespace Feverfew.Collectors
 
         private static void Amd(Section s)
         {
-            bool found = false;
+            var adapters = AmdAdapters();
+            foreach (var a in adapters)
+            {
+                if (a.SoftwareVersion != null) s.Add("AMD Software version (" + a.Name + ")", a.SoftwareVersion);
+                if (a.Ulps != null) s.Add("Ultra Low Power State (" + a.Name + ")", a.Ulps.Value ? "On" : "Off");
+            }
+            s.Note(adapters.Count > 0 ? "Anti-Lag, Chill and other Radeon settings are stored per game and can't be read here." : "AMD details: no driver entry was found.");
+        }
+
+        public sealed class AmdAdapter
+        {
+            public string Name, SoftwareVersion;
+            public bool? Ulps;
+        }
+
+        /// <summary>The AMD display driver entries in the registry, one per adapter.</summary>
+        public static List<AmdAdapter> AmdAdapters()
+        {
+            var adapters = new List<AmdAdapter>();
             using (var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
             using (var key = root.OpenSubKey(VideoClass))
             {
-                if (key == null) return;
+                if (key == null) return adapters;
                 foreach (var sub in key.GetSubKeyNames().Where(n => n.All(char.IsDigit)))
                     using (var k = key.OpenSubKey(sub))
                     {
                         var name = k == null ? null : k.GetValue("DriverDesc") as string;
                         if (name == null || (name.IndexOf("AMD", StringComparison.OrdinalIgnoreCase) < 0 && name.IndexOf("Radeon", StringComparison.OrdinalIgnoreCase) < 0)) continue;
-                        found = true;
                         var software = k.GetValue("RadeonSoftwareVersion");
-                        if (software != null) s.Add("AMD Software version (" + name + ")", software);
                         var ulps = k.GetValue("EnableUlps");
-                        if (ulps != null) s.Add("Ultra Low Power State (" + name + ")", Convert.ToInt32(ulps) == 0 ? "Off" : "On");
+                        adapters.Add(new AmdAdapter
+                        {
+                            Name = name,
+                            SoftwareVersion = software == null ? null : software.ToString().Trim(),
+                            Ulps = ulps == null ? (bool?)null : Convert.ToInt32(ulps) != 0
+                        });
                     }
             }
-            s.Note(found ? "Anti-Lag, Chill and other Radeon settings are stored per game and can't be read here." : "AMD details: no driver entry was found.");
+            return adapters;
         }
 
         private static bool Is(Row gpu, string vendor) { return gpu.Str("Name").IndexOf(vendor, StringComparison.OrdinalIgnoreCase) >= 0; }
