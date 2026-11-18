@@ -48,6 +48,9 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Warning, "Firewall is off", "Off for: " + string.Join(", ", off) + " networks. Third-party security software sometimes does this on purpose.", "Check Windows Security > Firewall & network protection.");
             });
 
+            Guard.Try(s, "System Protection", () => SystemProtection(r, s));
+            Guard.Try(s, "Recovery environment", () => RecoveryEnvironment(r, s));
+
             Guard.Try(s, "Windows updates", () =>
             {
                 var fixes = Wmi.Cim("SELECT HotFixID, Description, InstalledOn FROM Win32_QuickFixEngineering")
@@ -120,6 +123,58 @@ namespace Feverfew.Collectors
                 var t = s.Table("Installed programs", "Name", "Version", "Publisher", "Installed");
                 t.Rows.AddRange(apps.Values.OrderBy(a => a[0], StringComparer.OrdinalIgnoreCase));
             });
+        }
+
+        // Restore points: whether Windows makes them, how many exist, and whether they've been lost for lack of space.
+        private static void SystemProtection(Report r, Section s)
+        {
+            var interval = Reg.Machine(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore", "RPSessionInterval");
+            bool? on = interval == null ? (bool?)null : Convert.ToInt32(interval) == 1;
+            s.Add("System Protection (restore points)", on == null ? "Unknown" : on.Value ? "On" : "Off");
+
+            if (Scanner.IsElevated())
+            {
+                Guard.Try(s, "Restore points", () =>
+                {
+                    var points = Wmi.Query(@"root\default", "SELECT CreationTime FROM SystemRestore").Select(p => p.Date("CreationTime")).Where(d => d != null).ToList();
+                    s.Add("Restore points", points.Count == 0 ? "None" : points.Count + ", newest " + Fmt.Time(points.Max()));
+                });
+                Guard.Try(s, "Restore point space", () =>
+                {
+                    var store = Wmi.Cim("SELECT UsedSpace, MaxSpace FROM Win32_ShadowStorage").FirstOrDefault();
+                    if (store != null) s.Add("Restore point space", Fmt.Bytes(store.Long("UsedSpace")) + " used of " + Fmt.Bytes(store.Long("MaxSpace")));
+                });
+            }
+
+            // Volsnap 25 and 36: shadow copies (restore points) deleted or aborted because their storage couldn't grow.
+            int lost = 0;
+            var q = new System.Diagnostics.Eventing.Reader.EventLogQuery("System", System.Diagnostics.Eventing.Reader.PathType.LogName,
+                "*[System[Provider[@Name='volsnap'] and (EventID=25 or EventID=36) and TimeCreated[timediff(@SystemTime) <= " + 30 * 86400000L + "]]]");
+            using (var reader = new System.Diagnostics.Eventing.Reader.EventLogReader(q))
+            {
+                System.Diagnostics.Eventing.Reader.EventRecord e;
+                while ((e = reader.ReadEvent()) != null) using (e) lost++;
+            }
+            if (lost > 0)
+                r.Find(Severity.Warning, "Restore points were deleted for lack of space", "Windows deleted or abandoned restore points " + lost + " time" + (lost == 1 ? "" : "s") + " in the last 30 days because their storage limit was too small.",
+                    "Open Create a restore point (sysdm.cpl), choose the C: drive, press Configure and raise Max Usage to 5 to 10%.");
+            else if (on == false)
+                r.Find(Severity.Info, "System Protection is off", "Windows isn't keeping restore points, so a bad driver or update can't be rolled back that way, and Repair tools' restore point will fail.",
+                    "Open Create a restore point (sysdm.cpl), choose the C: drive, press Configure and turn on system protection with 5 to 10% of the drive.");
+        }
+
+        // The Windows Recovery Environment runs Startup Repair and asks for the BitLocker key when Windows can't start.
+        private static void RecoveryEnvironment(Report r, Section s)
+        {
+            var path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"Recovery\ReAgent.xml");
+            if (!System.IO.File.Exists(path)) { s.Add("Recovery environment", "Unknown"); return; }
+            var doc = System.Xml.Linq.XDocument.Load(path);
+            var state = doc.Descendants("InstallState").Select(x => (string)x.Attribute("state")).FirstOrDefault();
+            bool enabled = state == "1";
+            s.Add("Recovery environment (WinRE)", enabled ? "On" : "Off");
+            if (!enabled)
+                r.Find(Severity.Warning, "Windows Recovery Environment is off", "If Windows stops starting, Startup Repair, System Restore and Reset this PC won't be available from the boot menu.",
+                    "From an administrator prompt run: reagentc /enable. If that fails, the recovery partition may be missing or too small.");
         }
 
         private static long SafeMemory(Process p)
