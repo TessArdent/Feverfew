@@ -30,6 +30,69 @@ namespace Feverfew.Collectors
             public readonly List<string> SuspectDrivers = new List<string>();
             public readonly List<string> DumpDrivers = new List<string>(); // from crash dumps in the last Days days
             public readonly List<DateTime> Restarts = new List<DateTime>(); // Kernel-Power 41, newest first
+            public readonly Dictionary<string, Whea> Whea = new Dictionary<string, Whea>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private sealed class Whea
+        {
+            public int Count; public DateTime? Last; public bool Fatal; public string Component, Source, Type, Device;
+        }
+
+        private static string Field(string text, string pattern)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(text, pattern + @":[ \t]*([^\r\n]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups[1].Value.Trim() : "";
+        }
+
+        private static void TrackWhea(EventRecord e, Evidence ev)
+        {
+            string text = "";
+            try { text = e.FormatDescription() ?? ""; } catch (Exception) { }
+            var component = Field(text, @"(?:Reported by component|Component)");
+            var source = Field(text, "Error Source");
+            var type = Field(text, "Error Type");
+            // PCIe errors name the device by hardware ID or by vendor and device numbers.
+            var device = "";
+            var id = System.Text.RegularExpressions.Regex.Match(text, @"VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!id.Success) id = System.Text.RegularExpressions.Regex.Match(text, @"Vendor ID:Device ID:\s*0x([0-9A-F]{1,4}):0x([0-9A-F]{1,4})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (id.Success) device = "VEN_" + id.Groups[1].Value.PadLeft(4, '0').ToUpperInvariant() + "&DEV_" + id.Groups[2].Value.PadLeft(4, '0').ToUpperInvariant();
+            bool fatal = (e.Level ?? 3) <= 2;
+            var key = e.Id + "|" + fatal + "|" + component + "|" + source + "|" + type + "|" + device;
+            Whea w;
+            if (!ev.Whea.TryGetValue(key, out w))
+                ev.Whea[key] = w = new Whea { Last = e.TimeCreated, Fatal = fatal, Component = component, Source = source, Type = type, Device = device };
+            w.Count++;
+        }
+
+        private static void WheaTable(Report r, Section s, Evidence ev, int corrected)
+        {
+            if (ev.Whea.Count == 0) return;
+            var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dev in ev.Whea.Values.Select(w => w.Device).Where(d => d.Length > 0).Distinct())
+                try
+                {
+                    var match = Wmi.Cim("SELECT Name FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%" + dev + "%'").FirstOrDefault();
+                    names[dev] = match != null && match.Str("Name").Length > 0 ? match.Str("Name") + " (" + dev + ")" : dev;
+                }
+                catch (Exception) { names[dev] = dev; }
+
+            var t = s.Table("Hardware errors (WHEA)", "Count", "Last seen", "Kind", "Component", "Error source", "Error type", "Device");
+            foreach (var w in ev.Whea.Values.OrderByDescending(w => w.Fatal).ThenByDescending(w => w.Count))
+                t.Rows.Add(new[] { w.Count.ToString(), Fmt.Time(w.Last), w.Fatal ? "Fatal" : "Corrected", w.Component, w.Source, w.Type, w.Device.Length > 0 ? names[w.Device] : "" });
+
+            var top = ev.Whea.Values.Where(w => !w.Fatal).OrderByDescending(w => w.Count).FirstOrDefault();
+            if (corrected >= 10 && top != null)
+            {
+                string where = (top.Component + " " + top.Source).ToLowerInvariant();
+                string advice = where.Contains("pci")
+                    ? "Reseat " + (top.Device.Length > 0 ? names[top.Device] : "the graphics card and NVMe drive") + ". If errors continue, set that slot's PCIe generation one step lower in BIOS setup, and update the BIOS."
+                    : where.Contains("memory")
+                        ? "Turn off the memory profile (XMP or EXPO) to test, then check the memory with MemTest86."
+                        : where.Contains("processor") || where.Contains("machine check")
+                            ? "Remove any CPU overclock or undervolt, load the BIOS defaults, and update the BIOS."
+                            : "Reseat the graphics card and NVMe drive, then update the BIOS.";
+                r.Find(Severity.Warning, "Repeated corrected hardware errors", corrected + " corrected WHEA events, most from " + (top.Component.Length > 0 ? top.Component : "an unnamed component") + ". See 'Hardware errors (WHEA)'.", advice);
+            }
         }
 
         private static readonly int[] DiskErrorIds = { 11, 51, 52, 153, 154 };
@@ -48,6 +111,8 @@ namespace Feverfew.Collectors
                 if (m.Success) disk = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
                 int c; ev.DiskErrors.TryGetValue(disk, out c); ev.DiskErrors[disk] = c + 1;
             }
+            else if (Is(e, "Microsoft-Windows-WHEA-Logger"))
+                TrackWhea(e, ev);
             else if (Is(e, "Microsoft-Windows-Kernel-Power") && e.Id == 41 && e.TimeCreated != null)
                 ev.Restarts.Add(e.TimeCreated.Value);
             else if (Is(e, "Microsoft-Windows-Kernel-Processor-Power") && e.Id == 37 && e.TimeCreated != null)
@@ -303,9 +368,8 @@ namespace Feverfew.Collectors
             if (kernelPower > bugcheck)
                 r.Find(kernelPower >= 3 ? Severity.Critical : Severity.Warning, kernelPower + " unexpected restart" + (kernelPower == 1 ? "" : "s"), "The PC stopped without shutting down cleanly, and some of those restarts had no blue screen.", "Suspect the power supply, overheating, unstable overclocks, or someone holding the power button.");
             if (wheaError > 0)
-                r.Find(Severity.Critical, "Fatal hardware errors logged", wheaError + " WHEA errors. The CPU, RAM, motherboard or a PCIe device reported a failure.", "Remove any overclock, test the RAM with MemTest86, and read the WHEA message in the System errors table.");
-            if (wheaWarn >= 10)
-                r.Find(Severity.Warning, "Repeated corrected hardware errors", wheaWarn + " corrected WHEA events. Often a PCIe link or an unstable overclock.", "Reseat the graphics card and NVMe drive, then update the BIOS.");
+                r.Find(Severity.Critical, "Fatal hardware errors logged", wheaError + " WHEA errors. The CPU, RAM, motherboard or a PCIe device reported a failure.", "Remove any overclock, test the RAM with MemTest86, and check which component reported it in 'Hardware errors (WHEA)'.");
+            WheaTable(r, s, ev, wheaWarn);
             if (badBlock > 0)
                 r.Find(Severity.Critical, "Bad blocks reported on a disk", badBlock + " bad block events.", "Back up now, then test the drive with its maker's tool.");
             if (diskErr >= 5) DiskErrors(r, diskErr, ev);
