@@ -29,6 +29,7 @@ namespace Feverfew.Collectors
             public readonly List<uint> StopCodes = new List<uint>();
             public readonly List<string> SuspectDrivers = new List<string>();
             public readonly List<string> DumpDrivers = new List<string>(); // from crash dumps in the last Days days
+            public readonly List<DateTime> Restarts = new List<DateTime>(); // Kernel-Power 41, newest first
         }
 
         private static readonly int[] DiskErrorIds = { 11, 51, 52, 153, 154 };
@@ -47,6 +48,8 @@ namespace Feverfew.Collectors
                 if (m.Success) disk = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
                 int c; ev.DiskErrors.TryGetValue(disk, out c); ev.DiskErrors[disk] = c + 1;
             }
+            else if (Is(e, "Microsoft-Windows-Kernel-Power") && e.Id == 41 && e.TimeCreated != null)
+                ev.Restarts.Add(e.TimeCreated.Value);
             else if (Is(e, "Microsoft-Windows-Kernel-Processor-Power") && e.Id == 37 && e.TimeCreated != null)
                 ev.Throttles.Add(e.TimeCreated.Value);
             else if (Is(e, "Microsoft-Windows-WER-SystemErrorReporting") && e.Id == 1001 || Is(e, "BugCheck") && e.Id == 1001)
@@ -137,6 +140,7 @@ namespace Feverfew.Collectors
                     s.Note("Windows logs these when the PC starts again, so the crash itself came earlier. An 'improper shutdown' message gives Windows' last recorded time before the stop.");
                 }
                 Analyze(r, s, sys, evidence);
+                Guard.Try(s, "Crash timelines", () => Timelines(s, evidence.Restarts));
             });
 
             Guard.Try(s, "Application log", () =>
@@ -161,6 +165,75 @@ namespace Feverfew.Collectors
             });
 
             Guard.Try(s, "Crash dumps", () => Dumps(r, s, dumps));
+        }
+
+        private const int MaxTimelines = 5;
+        private const int MaxTimelineRows = 40;
+
+        // For each unexpected restart, the warnings and errors from the last minutes before the PC stopped and from the restart itself,
+        // so related events in different logs read as one story.
+        private static void Timelines(Section s, List<DateTime> restarts)
+        {
+            var boots = Read("System", "*[System[Provider[@Name='Microsoft-Windows-Kernel-General'] and EventID=12 and TimeCreated[timediff(@SystemTime) <= " + Days * 86400000L + "]]]", 500)
+                .Select(e => e.Time).OrderBy(t => t).ToList();
+            foreach (var restart in restarts.Take(MaxTimelines))
+            {
+                var boot = boots.LastOrDefault(b => b <= restart.AddMinutes(1));
+                if (boot == default(DateTime)) boot = restart.AddMinutes(-2);
+                // The last thing the crashed session logged, at any level, marks roughly when it stopped.
+                var last = Read("System", "*[System[TimeCreated[@SystemTime<'" + Utc(boot.AddSeconds(-1)) + "' and @SystemTime>='" + Utc(boot.AddDays(-2)) + "']]]", 1, true).FirstOrDefault();
+                var stopped = last != null ? last.Time : boot.AddMinutes(-1);
+                // Windows logs the blue screen and improper shutdown events within about 30 seconds of Kernel-Power 41.
+                var end = (restart > boot ? restart : boot).AddSeconds(45);
+                string window = "*[System[(Level=1 or Level=2 or Level=3) and TimeCreated[@SystemTime>='" + Utc(stopped.AddMinutes(-15)) + "' and @SystemTime<='" + Utc(end) + "']]]";
+                var all = Read("System", window, 200, true).Concat(Read("Application", window, 200, true))
+                    .Where(e => !UsuallyHarmless(e.Source, e.Id)).ToList();
+                // Keep the events nearest the stop, and the first ones after the restart.
+                var before = all.Where(e => e.Time < boot).OrderByDescending(e => e.Time).Take(MaxTimelineRows - 12);
+                var after = all.Where(e => e.Time >= boot).OrderBy(e => e.Time).Take(12);
+                var events = before.Concat(after).OrderBy(e => e.Time).ToList();
+                if (events.Count == 0) continue;
+                var t = s.Table("Events around the restart at " + Fmt.Seconds(restart), "Time", "Log", "Level", "Source", "ID", "Message");
+                foreach (var e in events)
+                    t.Rows.Add(new[] { Fmt.Seconds(e.Time) + (e.Time >= boot ? " (after restart)" : ""), e.Log, e.Level, e.Source, e.Id, e.Message });
+            }
+            if (s.Tables.Any(t => t.Title.StartsWith("Events around the restart", StringComparison.Ordinal)))
+                s.Note("Each timeline runs from 15 minutes before the last event Windows logged before it stopped, through the first minutes after the restart.");
+        }
+
+        private sealed class Line { public DateTime Time; public string Log, Level, Source, Id, Message; }
+
+        // Events Windows logs on healthy PCs all the time. They're kept out of timelines and marked in the error lists.
+        private static readonly HashSet<string> Harmless = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Microsoft-Windows-DistributedCOM|10010", "Microsoft-Windows-DistributedCOM|10016",
+            "Microsoft-Windows-Windows Firewall With Advanced Security|2042", "Microsoft-Windows-DNS-Client|8048",
+            "Microsoft-Windows-WMI|63", "Microsoft-Windows-Kernel-PnP|219"
+        };
+
+        private static bool UsuallyHarmless(string source, string id) { return Harmless.Contains(source + "|" + id); }
+
+        private static string Utc(DateTime local) { return local.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture); }
+
+        private static List<Line> Read(string log, string xpath, int max, bool newestFirst = false)
+        {
+            var list = new List<Line>();
+            var q = new EventLogQuery(log, PathType.LogName, xpath) { ReverseDirection = newestFirst };
+            using (var reader = new EventLogReader(q))
+            {
+                EventRecord e;
+                while (list.Count < max && (e = reader.ReadEvent()) != null)
+                    using (e)
+                    {
+                        if (e.TimeCreated == null) continue;
+                        list.Add(new Line
+                        {
+                            Time = e.TimeCreated.Value, Log = log, Source = e.ProviderName, Id = e.Id.ToString(CultureInfo.InvariantCulture), Message = Describe(e),
+                            Level = e.Level == 1 ? "Critical" : e.Level == 2 ? "Error" : e.Level == 3 ? "Warning" : "Information"
+                        });
+                    }
+            }
+            return list;
         }
 
         private static void RecordShutdown(EventRecord e, List<string[]> rows)
