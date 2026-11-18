@@ -167,9 +167,25 @@ namespace Feverfew.Collectors
 
             Guard.Try(s, "Monitors", () =>
             {
-                var t = s.Table("Connected monitors", "Maker code", "Model");
-                foreach (var m in Wmi.Query(@"root\wmi", "SELECT ManufacturerName, UserFriendlyName FROM WmiMonitorID"))
-                    t.Rows.Add(new[] { Decode(m.Raw("ManufacturerName")), Decode(m.Raw("UserFriendlyName")) });
+                var displays = DisplayInfo.Active();
+                if (displays.Count == 0)
+                {
+                    var old = s.Table("Connected monitors", "Maker code", "Model");
+                    foreach (var m in Wmi.Query(@"root\wmi", "SELECT ManufacturerName, UserFriendlyName FROM WmiMonitorID"))
+                        old.Rows.Add(new[] { Decode(m.Raw("ManufacturerName")), Decode(m.Raw("UserFriendlyName")) });
+                    return;
+                }
+                var t = s.Table("Connected monitors", "Monitor", "Connected to", "Resolution", "Refresh rate", "Highest at this resolution", "Main display");
+                foreach (var d in displays)
+                    t.Rows.Add(new[] { d.Name, d.Adapter, d.Width + " x " + d.Height, d.Hz + " Hz", d.MaxHzAtResolution + " Hz", Fmt.YesNo(d.Primary) });
+
+                // A desktop with a graphics card whose monitor is plugged into the motherboard runs games on the processor's graphics.
+                bool hasCard = Wmi.Cim("SELECT Name FROM Win32_VideoController").Any(g => DisplayInfo.IsDiscrete(g.Str("Name")));
+                var onBoard = displays.Where(d => !d.Internal && DisplayInfo.IsIntegrated(d.Adapter)).ToList();
+                if (hasCard && onBoard.Count > 0 && !Machine.IsLaptop())
+                    r.Find(Severity.Warning, "A monitor is plugged into the motherboard",
+                        string.Join(", ", onBoard.Select(d => d.Name)) + " is connected to " + onBoard[0].Adapter + ", the processor's graphics, even though this PC has a graphics card.",
+                        "Plug it into one of the graphics card's outputs (the lower ports on the back of the PC). Games shown on it run slower, and the graphics card may sit idle.");
             });
 
             Guard.Try(s, "Sound devices", () =>

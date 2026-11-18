@@ -105,6 +105,24 @@ namespace Feverfew
         }
     }
 
+    public static class Machine
+    {
+        private static bool? laptop;
+
+        /// <summary>True for laptops and tablets: Windows calls the PC mobile, or it has a battery.</summary>
+        public static bool IsLaptop()
+        {
+            if (laptop != null) return laptop.Value;
+            try
+            {
+                laptop = Wmi.Cim("SELECT PCSystemType FROM Win32_ComputerSystem").FirstOrDefault()?.Long("PCSystemType") == 2
+                    || Wmi.Cim("SELECT Name FROM Win32_Battery").Count > 0;
+            }
+            catch (Exception) { laptop = false; }
+            return laptop.Value;
+        }
+    }
+
     public static class Reg
     {
         public static object Get(RegistryHive hive, string key, string value, RegistryView view = RegistryView.Registry64)

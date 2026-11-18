@@ -202,7 +202,17 @@ namespace Feverfew.Collectors
             Guard.Try(s, "Graphics adapters", () =>
             {
                 gpus = Wmi.Cim("SELECT Name, CurrentRefreshRate, MaxRefreshRate, CurrentHorizontalResolution FROM Win32_VideoController");
-                foreach (var g in gpus.Where(x => x.Long("CurrentHorizontalResolution") > 0 && !HardwareCollector.IsVirtualDisplay(x.Str("Name"))))
+                var displays = DisplayInfo.Active().Where(d => !HardwareCollector.IsVirtualDisplay(d.Adapter)).ToList();
+                foreach (var d in displays)
+                {
+                    if (d.Hz <= 1) continue;
+                    s.Add("Refresh rate (" + d.Name + ")", d.Hz + " Hz, up to " + d.MaxHzAtResolution + " Hz at " + d.Width + " x " + d.Height);
+                    if (d.MaxHzAtResolution > d.Hz + 1)
+                        r.Find(Severity.Info, "Gaming: " + d.Name + " is below its highest refresh rate", "Running at " + d.Hz + " Hz, and it supports up to " + d.MaxHzAtResolution + " Hz at this resolution.",
+                            "Choose the higher rate in Settings > System > Display > Advanced display.");
+                }
+                // Per-adapter figures only when the monitor list isn't available.
+                foreach (var g in gpus.Where(x => displays.Count == 0 && x.Long("CurrentHorizontalResolution") > 0 && !HardwareCollector.IsVirtualDisplay(x.Str("Name"))))
                 {
                     long current = g.Long("CurrentRefreshRate") ?? 0, max = g.Long("MaxRefreshRate") ?? 0;
                     if (current <= 1 || max <= 1) continue;

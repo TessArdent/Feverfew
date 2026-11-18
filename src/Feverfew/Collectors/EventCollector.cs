@@ -437,13 +437,7 @@ namespace Feverfew.Collectors
 
         private static void Throttling(Report r, int count, Evidence ev)
         {
-            bool laptop = false;
-            try
-            {
-                laptop = Wmi.Cim("SELECT PCSystemType FROM Win32_ComputerSystem").FirstOrDefault()?.Long("PCSystemType") == 2
-                    || Wmi.Cim("SELECT Name FROM Win32_Battery").Count > 0;
-            }
-            catch (Exception) { }
+            bool laptop = Machine.IsLaptop();
 
             var boots = new List<DateTime>();
             try
