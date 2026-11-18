@@ -138,14 +138,36 @@ namespace Feverfew.Collectors
                 foreach (var name in key.GetSubKeyNames())
                     using (var k = key.OpenSubKey(name))
                     {
-                        var display = k == null ? null : k.GetValue("DisplayName") as string;
-                        if (string.IsNullOrWhiteSpace(display) || Convert.ToInt32(k.GetValue("SystemComponent", 0)) == 1) continue;
-                        apps[display] = new[]
-                        {
-                            display, k.GetValue("DisplayVersion") as string ?? "", k.GetValue("Publisher") as string ?? "", k.GetValue("InstallDate") as string ?? ""
-                        };
+                        if (k == null) continue;
+                        AddProgram(apps, k);
                     }
             }
+        }
+
+        // Installers write InstallDate as yyyyMMdd, but some write Unix seconds or an impossible date such as 20254202.
+        private static string InstallDate(string raw)
+        {
+            raw = (raw ?? "").Trim();
+            DateTime d;
+            if (raw.Length == 8 && DateTime.TryParseExact(raw, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out d))
+                return Fmt.Date(d);
+            long seconds;
+            if (raw.Length >= 9 && raw.Length <= 10 && long.TryParse(raw, out seconds))
+            {
+                d = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(seconds).ToLocalTime();
+                if (d.Year >= 1995 && d <= DateTime.Now.AddDays(1)) return Fmt.Date(d);
+            }
+            return "";
+        }
+
+        private static void AddProgram(Dictionary<string, string[]> apps, RegistryKey k)
+        {
+            var display = k.GetValue("DisplayName") as string;
+            if (string.IsNullOrWhiteSpace(display) || Convert.ToInt32(k.GetValue("SystemComponent", 0)) == 1) return;
+            apps[display] = new[]
+            {
+                display, k.GetValue("DisplayVersion") as string ?? "", k.GetValue("Publisher") as string ?? "", InstallDate(k.GetValue("InstallDate") as string)
+            };
         }
     }
 }

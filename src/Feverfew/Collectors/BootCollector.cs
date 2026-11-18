@@ -207,7 +207,7 @@ namespace Feverfew.Collectors
             var t = s.Table("Trusted Secure Boot certificates", "Store", "Certificate", "Expires");
             foreach (var pair in new[] { Tuple.Create("PK", pk), Tuple.Create("KEK", kek), Tuple.Create("db", db), Tuple.Create("KEK (BIOS default)", defaultKek ?? new SignatureSet()), Tuple.Create("db (BIOS default)", state.DefaultDb ?? new SignatureSet()) })
                 foreach (var c in pair.Item2.Certificates)
-                    t.Rows.Add(new[] { pair.Item1, CommonName(c), Fmt.Date(c.NotAfter) });
+                    t.Rows.Add(new[] { pair.Item1, CommonName(c), Fmt.Date(c.NotAfter) + (c.NotAfter < DateTime.Now ? " (expired)" : "") });
 
             bool has2011 = Contains(db, "Windows Production PCA 2011");
             bool has2023 = Contains(db, Windows2023);

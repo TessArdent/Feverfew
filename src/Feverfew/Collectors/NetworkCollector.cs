@@ -32,7 +32,7 @@ namespace Feverfew.Collectors
 
                     t.Rows.Add(new[]
                     {
-                        n.Description, n.NetworkInterfaceType.ToString(), n.Speed > 0 ? Fmt.Num(n.Speed / 1000000.0, "0") + " Mbps" : "-",
+                        n.Description, TypeName(n.NetworkInterfaceType),n.Speed > 0 ? Fmt.Num(n.Speed / 1000000.0, "0") + " Mbps" : "-",
                         string.Join(", ", v4), string.Join(", ", gw), string.Join(", ", dns), dhcp ? "Yes" : "No", r.Private(mac)
                     });
 
@@ -99,6 +99,21 @@ namespace Feverfew.Collectors
             "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112",
             "208.67.222.222", "208.67.220.220", "94.140.14.14", "94.140.15.15", "76.76.2.0", "76.76.10.0", "194.242.2.2"
         };
+
+        // .NET has no name for some interface types, such as 53 (propVirtual), which VPNs like WireGuard use.
+        public static string TypeName(NetworkInterfaceType type)
+        {
+            switch ((int)type)
+            {
+                case 6: return "Ethernet";
+                case 71: return "Wi-Fi";
+                case 131: return "Tunnel";
+                case 53: return "Virtual (VPN or tunnel)";
+                case 243: case 244: return "Mobile broadband";
+                case 23: return "Dial-up (PPP)";
+                default: return Enum.IsDefined(typeof(NetworkInterfaceType), type) ? type.ToString() : "Type " + (int)type;
+            }
+        }
 
         private static bool IsPublic(IPAddress a)
         {

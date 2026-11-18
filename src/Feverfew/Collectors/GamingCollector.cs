@@ -243,7 +243,7 @@ namespace Feverfew.Collectors
                 var bar = i < bars.Count ? bars[i] : (long?)null;
                 t.Rows.Add(new[]
                 {
-                    c[0], c[1], c[2], c[3] + " °C", c[4] + "%", c[5] + " W / " + c[6] + " W",
+                    c[0], c[1], c[2], Whole(c[3]) + " °C", Whole(c[4]) + "%", Whole(c[5]) + " W / " + Whole(c[6]) + " W",
                     "Gen " + c[7] + " x" + c[9] + " / Gen " + c[8] + " x" + c[10],
                     bar == null ? "Unknown" : bar >= 1024 ? "On" : "Off"
                 });
@@ -344,6 +344,13 @@ namespace Feverfew.Collectors
             new GraphicsTip { Vendor = "AMD", Name = "Smart Access Memory", Text = "Needs Resizable BAR to be on in BIOS setup, and can then be checked in AMD Software." },
             new GraphicsTip { Vendor = "AMD", Name = "Radeon Chill", Text = "Leave it off for the highest frame rates. It's meant for saving power and heat." }
         };
+
+        // nvidia-smi prints values like 39.27 and 250.00; whole numbers read better.
+        private static string Whole(string v)
+        {
+            double d;
+            return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out d) ? Fmt.Num(d, "0") : v;
+        }
 
         public static List<GraphicsTip> TipsForThisPc()
         {
