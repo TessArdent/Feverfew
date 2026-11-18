@@ -20,28 +20,41 @@ namespace Feverfew.Collectors
                     var d = pair.Key; var c = pair.Value;
                     var health = d.Long("HealthStatus");
                     var name = d.Str("FriendlyName");
+                    // Windows' reliability counters often leave NVMe values empty or at 0, especially behind Intel RST, so ask the drive itself.
+                    int number;
+                    var nvme = int.TryParse(d.Str("DeviceId"), out number) ? NvmeHealth.Read(number) : null;
+                    long? temp = c != null && c.Long("Temperature") > 0 ? c.Long("Temperature") : nvme != null && nvme.TemperatureC > 0 ? nvme.TemperatureC : (long?)null;
+                    long? wear = nvme != null ? nvme.PercentUsed : c?.Long("Wear");
+                    long? readErrors = c?.Long("ReadErrorsUncorrected") ?? (nvme != null ? (long)nvme.MediaErrors : (long?)null);
+                    long? hours = c != null && c.Long("PowerOnHours") > 0 ? c.Long("PowerOnHours") : nvme != null && nvme.PowerOnHours > 0 ? (long)nvme.PowerOnHours : (long?)null;
                     t.Rows.Add(new[]
                     {
                         name, MediaType(d.Long("MediaType")), BusType(d.Long("BusType")), Fmt.Bytes(d.Long("Size")),
                         health == 0 ? "Healthy" : health == 1 ? "Warning" : health == 2 ? "Unhealthy" : "Unknown",
-                        c != null && c.Long("Temperature") > 0 ? c.Str("Temperature") + " °C" : "-",
-                        c != null && c.Long("Wear") != null ? c.Str("Wear") + "%" : "-",
-                        c != null && c.Long("ReadErrorsUncorrected") != null ? c.Str("ReadErrorsUncorrected") : "-",
-                        c != null && c.Long("PowerOnHours") > 0 ? c.Str("PowerOnHours") : "-",
+                        temp != null ? temp + " °C" : "-",
+                        wear != null ? wear + "%" : "-",
+                        readErrors != null ? readErrors.ToString() : "-",
+                        hours != null ? hours.ToString() : "-",
                         d.Str("FirmwareVersion"), r.Private(d.Str("SerialNumber"))
                     });
+
+                    if (nvme != null && nvme.CriticalWarning != 0)
+                        r.Find(Severity.Critical, "Drive reports a critical warning: " + name, NvmeWarning(nvme.CriticalWarning), "Back up now and check the drive with its maker's tool.");
+                    if (nvme != null && c?.Long("ReadErrorsUncorrected") == null && nvme.MediaErrors > 0)
+                        r.Find(Severity.Warning, "Drive has logged data errors: " + name, nvme.MediaErrors + " media or data integrity errors since it was made.", "Back up soon and check the drive with its maker's tool.");
 
                     if (health == 2)
                         r.Find(Severity.Critical, "Drive reports it is failing: " + name, "Windows marks this drive Unhealthy.", "Back up now and replace the drive.");
                     else if (health == 1)
                         r.Find(Severity.Warning, "Drive health warning: " + name, "Windows marks this drive with a health warning.", "Back up soon and check the drive with its maker's tool.");
-                    if (c != null && c.Long("Wear") >= 90)
-                        r.Find(Severity.Warning, "SSD is near the end of its rated life: " + name, "Wear level is " + c.Str("Wear") + "%.", "Plan a replacement and keep backups current.");
-                    if (c != null && c.Long("Temperature") >= 70)
-                        r.Find(Severity.Warning, "Drive is hot: " + name, c.Str("Temperature") + " °C during the scan.", "Improve airflow around the drive.");
+                    if (wear >= 90)
+                        r.Find(Severity.Warning, "SSD is near the end of its rated life: " + name, "Wear level is " + wear + "%.", "Plan a replacement and keep backups current.");
+                    if (temp >= 70)
+                        r.Find(Severity.Warning, "Drive is hot: " + name, temp + " °C during the scan.", "Improve airflow around the drive.");
                     if (c != null && c.Long("ReadErrorsUncorrected") > 0)
                         r.Find(Severity.Critical, "Uncorrected read errors on " + name, c.Str("ReadErrorsUncorrected") + " errors reported by the drive.", "Back up now and test the drive.");
                 }
+                s.Note("Wear is the drive's own estimate of how much of its rated life is used. A dash means the drive, or a driver in front of it such as Intel RST or a USB enclosure, doesn't report that value.");
             });
 
             Guard.Try(s, "SMART failure prediction", () =>
@@ -182,6 +195,17 @@ namespace Feverfew.Collectors
                 case 131: return "Linux";
                 default: return "MBR type " + mbr;
             }
+        }
+
+        private static string NvmeWarning(byte bits)
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            if ((bits & 0x01) != 0) parts.Add("its spare space is below the safe level");
+            if ((bits & 0x02) != 0) parts.Add("its temperature is outside the safe range");
+            if ((bits & 0x04) != 0) parts.Add("its reliability is degraded by media errors");
+            if ((bits & 0x08) != 0) parts.Add("it has switched itself to read-only");
+            if ((bits & 0x10) != 0) parts.Add("its power-loss backup has failed");
+            return parts.Count == 0 ? "The drive set a critical warning flag." : "The drive reports that " + string.Join(", ", parts) + ".";
         }
 
         private static string MediaType(long? v) { return v == 3 ? "HDD" : v == 4 ? "SSD" : v == 5 ? "SCM" : "Unknown"; }
