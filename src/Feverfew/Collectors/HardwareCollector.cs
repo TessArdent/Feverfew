@@ -100,11 +100,16 @@ namespace Feverfew.Collectors
                 var speed = sticks.Select(m => m.Long("ConfiguredClockSpeed")).FirstOrDefault(v => v > 0);
                 r.AddSummary("Memory", Fmt.Bytes(total) + " in " + sticks.Count + " module" + (sticks.Count == 1 ? "" : "s") + (speed != null ? " at " + speed + " MT/s" : ""));
 
-                Guard.Try(s, "Memory slots", () =>
-                {
-                    var a = Wmi.Cim("SELECT MemoryDevices, MaxCapacityEx FROM Win32_PhysicalMemoryArray").FirstOrDefault();
-                    if (a != null) s.Add("Slots used", sticks.Count + " of " + a.Str("MemoryDevices"));
-                });
+                // LPDDR (SMBIOS types 27-30 and 35) and "row of chips" modules are soldered to the board, so there are no slots to fill.
+                bool soldered = sticks.Count > 0 && sticks.All(m => new long?[] { 27, 28, 29, 30, 35 }.Contains(m.Long("SMBIOSMemoryType")) || m.Long("FormFactor") == 11);
+                if (soldered)
+                    s.Add("Slots used", "None: soldered to the board, so it can't be upgraded");
+                else
+                    Guard.Try(s, "Memory slots", () =>
+                    {
+                        var a = Wmi.Cim("SELECT MemoryDevices, MaxCapacityEx FROM Win32_PhysicalMemoryArray").FirstOrDefault();
+                        if (a != null) s.Add("Slots used", sticks.Count + " of " + a.Str("MemoryDevices"));
+                    });
 
                 if (sticks.Select(m => m.Long("Capacity")).Distinct().Count() > 1 || sticks.Select(m => m.Str("PartNumber")).Distinct().Count() > 1)
                     r.Find(Severity.Info, "Mixed memory modules", "The installed RAM sticks aren't an identical set.",
@@ -414,6 +419,9 @@ namespace Feverfew.Collectors
                 s.Add("Capacity remaining", Fmt.Num(health, "0") + "% of original");
                 if (health < 60)
                     r.Find(Severity.Warning, "Battery is badly worn", "It now holds " + Fmt.Num(health, "0") + "% of its original charge.", "Consider replacing it, and check it isn't swollen.");
+                else if (health < 80)
+                    r.Find(Severity.Info, "Battery is wearing", "It now holds " + Fmt.Num(health, "0") + "% of its original charge, so it runs out sooner than when new.",
+                        "Normal for an older battery. If the maker's app offers a charge limit (often 80%), turning it on slows further wear.");
             });
             Guard.Try(s, "Battery cycles", () =>
             {

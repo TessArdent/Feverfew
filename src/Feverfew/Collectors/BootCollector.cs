@@ -221,6 +221,12 @@ namespace Feverfew.Collectors
                     "In BIOS setup, reinstall the default Secure Boot keys. If they're still absent, update the BIOS.");
             else
                 state.KeysUsable = true;
+
+            // Windows added the 2023 certificate to the live db, but the BIOS's own defaults predate it.
+            if (has2023 && state.DefaultDb != null && !Contains(state.DefaultDb, Windows2023))
+                r.Find(Severity.Info, "Resetting Secure Boot keys would remove the 2023 certificate",
+                    "The firmware trusts " + Windows2023 + " now, but the BIOS's built-in default keys don't include it. Loading BIOS defaults or restoring factory keys would put the old set back.",
+                    "Avoid resetting Secure Boot keys. A BIOS update from the PC or motherboard maker usually adds the 2023 certificates to the defaults.");
         }
 
         private static void CheckWindowsLoaderTrust(Report r, BootState state)

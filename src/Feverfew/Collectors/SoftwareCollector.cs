@@ -67,8 +67,16 @@ namespace Feverfew.Collectors
             {
                 var plan = Wmi.Query(@"root\cimv2\power", "SELECT ElementName, IsActive FROM Win32_PowerPlan").FirstOrDefault(p => p.Bool("IsActive") == true);
                 if (plan != null) s.Add("Power plan", plan.Str("ElementName"));
+            });
+
+            // Separate from the power plan, which needs admin rights to read.
+            Guard.Try(s, "Fast Startup", () =>
+            {
                 var fast = Reg.Machine(@"SYSTEM\CurrentControlSet\Control\Session Manager\Power", "HiberbootEnabled");
                 if (fast != null) s.Add("Fast Startup", Convert.ToInt32(fast) == 1 ? "On" : "Off");
+                if (fast != null && Convert.ToInt32(fast) == 1)
+                    r.Find(Severity.Info, "Fast Startup is on", "Shut down saves Windows' core and drivers to disk instead of closing them, so it doesn't clear driver problems the way Restart does.",
+                        "When troubleshooting, use Restart rather than Shut down. If problems keep coming back after a shutdown, turn Fast Startup off in Control Panel > Power Options > Choose what the power buttons do.");
             });
         }
 
