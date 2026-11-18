@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Microsoft.Win32;
@@ -120,14 +121,14 @@ namespace Feverfew.Collectors
                 var t = s.Table("Graphics adapters", "Name", "Memory", "Driver version", "Driver date", "Current mode", "Status");
                 foreach (var g in gpus)
                 {
-                    var date = g.Date("DriverDate");
+                    var date = DriverDate(g.Str("PNPDeviceID")) ?? g.Date("DriverDate");
                     var mode = g.Long("CurrentHorizontalResolution") > 0
                         ? g.Str("CurrentHorizontalResolution") + " x " + g.Str("CurrentVerticalResolution") + " at " + g.Str("CurrentRefreshRate") + " Hz" : "Inactive";
-                    t.Rows.Add(new[] { g.Str("Name"), Fmt.Bytes(VideoMemory(g.Str("Name")) ?? g.Long("AdapterRAM")), g.Str("DriverVersion"), Fmt.Date(date), mode, g.Str("Status") });
+                    t.Rows.Add(new[] { g.Str("Name"), Fmt.Bytes(VideoMemory(g.Str("Name")) ?? g.Long("AdapterRAM")), g.Str("DriverVersion"), DateText(date), mode, g.Str("Status") });
 
                     if (g.Str("Name").IndexOf("Basic Display", StringComparison.OrdinalIgnoreCase) >= 0)
                         r.Find(Severity.Warning, "No proper graphics driver", "Windows is using the Microsoft Basic Display Adapter.", "Install the driver from NVIDIA, AMD, Intel, or the PC maker.");
-                    else if (date != null && (DateTime.Now - date.Value).TotalDays > 365 * 2)
+                    else if (date != null && !IsPlaceholder(date.Value) && (DateTime.Now - date.Value).TotalDays > 365 * 2)
                         r.Find(Severity.Info, "Old graphics driver", g.Str("Name") + " has a driver dated " + Fmt.Date(date) + ".", "Update it from the graphics card maker's site if games or video misbehave.");
                 }
                 r.AddSummary("Graphics", string.Join(", ", gpus.Select(g => g.Str("Name"))));
@@ -210,16 +211,54 @@ namespace Feverfew.Collectors
             Guard.Try(s, "Drivers", () =>
             {
                 var t = s.Table("Non-Microsoft drivers", "Device", "Provider", "Version", "Date", "Signed");
-                var rows = Wmi.Cim("SELECT DeviceName, DriverProviderName, DriverVersion, DriverDate, IsSigned FROM Win32_PnPSignedDriver")
+                var rows = Wmi.Cim("SELECT DeviceName, DeviceID, DriverProviderName, DriverVersion, DriverDate, IsSigned FROM Win32_PnPSignedDriver")
                     .Where(d => d.Str("DriverProviderName").Length > 0 && d.Str("DriverProviderName").IndexOf("Microsoft", StringComparison.OrdinalIgnoreCase) < 0)
                     .OrderBy(d => d.Str("DriverProviderName")).ThenBy(d => d.Str("DeviceName"))
                     .ToList();
                 foreach (var d in rows)
-                    t.Rows.Add(new[] { d.Str("DeviceName"), d.Str("DriverProviderName"), d.Str("DriverVersion"), Fmt.Date(d.Date("DriverDate")), Fmt.YesNo(d.Bool("IsSigned")) });
+                    t.Rows.Add(new[] { d.Str("DeviceName"), d.Str("DriverProviderName"), d.Str("DriverVersion"), DateText(DriverDate(d.Str("DeviceID"))), Fmt.YesNo(d.Bool("IsSigned")) });
                 var unsigned = rows.Where(d => d.Bool("IsSigned") == false).ToList();
                 if (unsigned.Count > 0)
                     r.Find(Severity.Warning, "Unsigned drivers installed", string.Join(", ", unsigned.Take(5).Select(d => d.Str("DeviceName"))), "Replace them with signed drivers from the device maker.");
             });
+        }
+
+        // Win32_PnPSignedDriver swaps the day and month of driver dates (DriverVer=09/03/2026 comes back as 9 March),
+        // so both driver tables read the date Windows stored with the device's driver instead.
+        private static DateTime? DriverDate(string deviceId)
+        {
+            if (string.IsNullOrEmpty(deviceId)) return null;
+            try
+            {
+                using (var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+                using (var dev = root.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\" + deviceId))
+                {
+                    var driver = dev?.GetValue("Driver") as string;
+                    if (string.IsNullOrEmpty(driver)) return null;
+                    using (var k = root.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\" + driver))
+                    {
+                        if (k == null) return null;
+                        var data = k.GetValue("DriverDateData") as byte[];
+                        if (data != null && data.Length >= 8) return DateTime.FromFileTimeUtc(BitConverter.ToInt64(data, 0)).Date;
+                        DateTime parsed;
+                        if (DateTime.TryParseExact(k.GetValue("DriverDate") as string, "M-d-yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
+                            return parsed;
+                    }
+                }
+            }
+            catch (Exception) { /* no date rather than a wrong one */ }
+            return null;
+        }
+
+        // Intel chipset INFs use 1968-07-18 so any other driver outranks them, and drivers built into Windows carry 2006-06-21.
+        private static bool IsPlaceholder(DateTime d)
+        {
+            return d.Date == new DateTime(1968, 7, 18) || d.Date == new DateTime(2006, 6, 21);
+        }
+
+        private static string DateText(DateTime? d)
+        {
+            return d != null && IsPlaceholder(d.Value) ? "Placeholder (" + Fmt.Date(d) + ")" : Fmt.Date(d);
         }
 
         // Keeps bus\vendor&product and drops the instance part, which can contain a device serial.
