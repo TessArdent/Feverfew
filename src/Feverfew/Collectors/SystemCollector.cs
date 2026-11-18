@@ -259,6 +259,12 @@ namespace Feverfew.Collectors
         {
             var s = r.NewSection("Windows 11 readiness");
             var g = r.Signals;
+            const int firstWindows11Build = 22000;
+            if (g.WindowsBuild >= firstWindows11Build)
+            {
+                s.Add("Status", "Already running Windows 11");
+                return;
+            }
             var t = s.Table("Requirements", "Requirement", "This PC", "Result");
             Action<string, string, bool?> row = (name, value, pass) =>
                 t.Rows.Add(new[] { name, value, pass == null ? "Could not check" : pass.Value ? "Pass" : "Fail" });

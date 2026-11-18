@@ -333,8 +333,16 @@ namespace Feverfew.Collectors
 
         private static void Fill(Table t, List<Group> groups)
         {
-            foreach (var g in groups.Where(g => g.Level <= 2).OrderByDescending(g => g.Count).Take(25))
-                t.Rows.Add(new[] { g.Count.ToString(), Fmt.Time(g.Last), g.Provider, g.Id.ToString(), g.Message });
+            // Known-harmless events go last, so the real problems are at the top.
+            foreach (var g in groups.Where(g => g.Level <= 2).OrderBy(IsHarmless).ThenByDescending(g => g.Count).Take(25))
+                t.Rows.Add(new[] { g.Count.ToString(), Fmt.Time(g.Last), g.Provider, g.Id.ToString(), (IsHarmless(g) ? "(Usually harmless) " : "") + g.Message });
+        }
+
+        private static bool IsHarmless(Group g)
+        {
+            if (UsuallyHarmless(g.Provider, g.Id.ToString(CultureInfo.InvariantCulture))) return true;
+            // The Downloaded Maps Manager stops with "not supported" on PCs that don't use offline maps.
+            return g.Provider == "Service Control Manager" && g.Id == 7023 && (g.Message ?? "").IndexOf("Downloaded Maps Manager", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static void Analyze(Report r, Section s, List<Group> sys, Evidence ev)

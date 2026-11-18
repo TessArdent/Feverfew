@@ -113,8 +113,9 @@ namespace Feverfew.Collectors
             {
                 var services = Wmi.Cim("SELECT Name, DisplayName, State, StartMode, ExitCode FROM Win32_Service");
                 var t = s.Table("Automatic services that aren't running", "Service", "Name", "State", "Exit code");
-                foreach (var v in services.Where(v => v.Str("StartMode") == "Auto" && v.Str("State") != "Running").OrderBy(v => v.Str("DisplayName")))
-                    t.Rows.Add(new[] { v.Str("DisplayName"), v.Str("Name"), v.Str("State"), v.Str("ExitCode") });
+                foreach (var v in services.Where(v => v.Str("StartMode") == "Auto" && v.Str("State") != "Running")
+                             .OrderBy(v => StopsByItself(v.Str("Name"))).ThenBy(v => v.Str("DisplayName")))
+                    t.Rows.Add(new[] { v.Str("DisplayName") + (StopsByItself(v.Str("Name")) ? " (normally stops by itself)" : ""), v.Str("Name"), v.Str("State"), v.Str("ExitCode") });
                 s.Note("Some automatic services stop by themselves when they have no work to do, so a stopped service isn't always a fault.");
                 var down = services.Where(v => EssentialServices.Contains(v.Str("Name"), StringComparer.OrdinalIgnoreCase) && v.Str("State") != "Running").ToList();
                 if (down.Count > 0)
@@ -131,6 +132,14 @@ namespace Feverfew.Collectors
                 var t = s.Table("Installed programs", "Name", "Version", "Publisher", "Installed");
                 t.Rows.AddRange(apps.Values.OrderBy(a => a[0], StringComparer.OrdinalIgnoreCase));
             });
+        }
+
+        // Automatic services that run briefly and stop, or start only when something triggers them.
+        private static readonly string[] SelfStopping = { "MapsBroker", "GoogleUpdater", "gupdate", "edgeupdate", "gpsvc", "sppsvc", "RemoteRegistry", "TrustedInstaller", "WbioSrvc", "Intel(R) TPM Provisioning Service", "Intel(R) Platform License Manager Service", "BITS", "UsoSvc", "sedsvc" };
+
+        private static bool StopsByItself(string name)
+        {
+            return SelfStopping.Any(n => (name ?? "").StartsWith(n, StringComparison.OrdinalIgnoreCase));
         }
 
         // Restore points: whether Windows makes them, how many exist, and whether they've been lost for lack of space.

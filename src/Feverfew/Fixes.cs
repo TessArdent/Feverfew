@@ -99,12 +99,20 @@ namespace Feverfew
         public static void AddToReport(Report r)
         {
             var s = r.NewSection("Typical fixes");
-            var t = s.Table("Commands to run from an administrator prompt", "Fix", "When to use it", "Command", "Undo command", "Caution");
-            foreach (var f in All) t.Rows.Add(new[] { f.Name, f.When, f.Command, f.Undo ?? "", f.Caution ?? "" });
-            var g = s.Table("Gaming optimisations", "Optimisation", "When to use it", "Command", "Undo command", "Caution");
-            foreach (var f in Gaming) g.Rows.Add(new[] { f.Name, f.When, f.Command, f.Undo ?? "", f.Caution ?? "" });
+            var t = s.Table("Commands to run from an administrator prompt", "Fix", "This PC", "When to use it", "Command", "Undo command", "Caution");
+            foreach (var f in All) t.Rows.Add(new[] { f.Name, StatusText(f), f.When, f.Command, f.Undo ?? "", f.Caution ?? "" });
+            var g = s.Table("Gaming optimisations", "Optimisation", "This PC", "When to use it", "Command", "Undo command", "Caution");
+            foreach (var f in Gaming) g.Rows.Add(new[] { f.Name, StatusText(f), f.When, f.Command, f.Undo ?? "", f.Caution ?? "" });
             s.Note("Feverfew doesn't run any of these during a scan. To run one, open Repair tools or Gaming in Feverfew.");
             s.Note("Undo on the Gaming page returns to the settings saved when Apply was pressed. The undo commands listed here are what it uses when nothing was saved.");
+        }
+
+        // The same status line the Repair tools and Gaming pages show, so a reader can tell which rows apply to this PC.
+        private static string StatusText(Fix f)
+        {
+            if (f.Status == null) return "";
+            try { return f.Status() ?? ""; }
+            catch (Exception) { return ""; }
         }
 
         private const char StatePairs = ';';
