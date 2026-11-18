@@ -14,16 +14,22 @@ namespace Feverfew.Collectors
             Guard.Try(s, "CPU", () =>
             {
                 var cpus = Wmi.Cim("SELECT * FROM Win32_Processor");
+                bool hypervisor = false;
+                Guard.Try(s, "Hypervisor", () => { hypervisor = Wmi.Cim("SELECT HypervisorPresent FROM Win32_ComputerSystem").FirstOrDefault()?.Bool("HypervisorPresent") == true; });
+                var live = SampleCpu();
                 foreach (var c in cpus)
                 {
                     s.Add("Model", c.Str("Name"));
                     s.Add("Socket", c.Str("SocketDesignation"));
                     s.Add("Cores / threads", c.Str("NumberOfCores") + " / " + c.Str("NumberOfLogicalProcessors"));
                     s.Add("Base speed", c.Str("MaxClockSpeed") + " MHz");
-                    s.Add("Speed during scan", c.Str("CurrentClockSpeed") + " MHz");
+                    // Win32_Processor's CurrentClockSpeed and LoadPercentage are the base speed and often empty, so use the performance counters.
+                    if (live != null && c.Long("MaxClockSpeed") > 0)
+                        s.Add("Speed during scan", Fmt.Num(c.Long("MaxClockSpeed").Value * live.Item1 / 100.0, "0") + " MHz");
                     s.Add("L2 / L3 cache", Fmt.Bytes(c.Long("L2CacheSize") * 1024) + " / " + Fmt.Bytes(c.Long("L3CacheSize") * 1024));
-                    s.Add("Load during scan", c.Str("LoadPercentage") + "%");
-                    s.Add("Virtualization on in firmware", Fmt.YesNo(c.Bool("VirtualizationFirmwareEnabled")));
+                    if (live != null) s.Add("Load during scan", Fmt.Num(Math.Min(100, live.Item2), "0") + "%");
+                    // With Windows' hypervisor running, Windows reports firmware virtualization as off even though it's in use.
+                    s.Add("Virtualization on in firmware", hypervisor ? "Yes (in use by Windows' hypervisor)" : Fmt.YesNo(c.Bool("VirtualizationFirmwareEnabled")));
                 }
                 var first = cpus.First();
                 r.AddSummary("CPU", first.Str("Name"));
@@ -46,6 +52,27 @@ namespace Feverfew.Collectors
                 if (t.Rows.Count == 0) s.Tables.Remove(t);
                 s.Note("Windows only exposes motherboard thermal zones, so these aren't per-core CPU temperatures.");
             });
+        }
+
+        /// <summary>Performance as a percentage of base speed, and utility (Task Manager's CPU figure), averaged over about a second. Null if unavailable.</summary>
+        private static Tuple<double, double> SampleCpu()
+        {
+            try
+            {
+                const string q = "SELECT PercentProcessorPerformance, PercentProcessorUtility FROM Win32_PerfFormattedData_Counters_ProcessorInformation WHERE Name='_Total'";
+                Wmi.Cim(q); // the first read only primes the counters
+                double perf = 0, util = 0;
+                for (int i = 0; i < 2; i++)
+                {
+                    System.Threading.Thread.Sleep(500);
+                    var row = Wmi.Cim(q).FirstOrDefault();
+                    if (row == null || row.Long("PercentProcessorPerformance") == null) return null;
+                    perf += row.Long("PercentProcessorPerformance").Value / 2.0;
+                    util += (row.Long("PercentProcessorUtility") ?? 0) / 2.0;
+                }
+                return perf > 0 ? Tuple.Create(perf, util) : null;
+            }
+            catch (Exception) { return null; }
         }
 
         public static void Memory(Report r)
