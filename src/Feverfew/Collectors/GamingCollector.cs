@@ -85,6 +85,17 @@ namespace Feverfew.Collectors
             s.Note("Game Mode and recording are per-user settings. If a different account approved the Windows permission prompt, these values are that account's.");
         }
 
+        private static readonly string[] VpnNames = { "WireGuard", "Wintun", "TAP-Windows", "OpenVPN", "Mullvad", "NordLynx", "NordVPN", "ProtonVPN", "ExpressVPN", "Surfshark", "Cisco AnyConnect", "Fortinet", "GlobalProtect", "PANGP", "Cloudflare WARP", "Windscribe", "PIA ", "Private Internet Access" };
+
+        private static bool IsVpn(NetworkInterface n)
+        {
+            int type = (int)n.NetworkInterfaceType;
+            const int ppp = 23, propVirtual = 53, tunnel = 131;
+            if (VpnNames.Any(v => n.Description.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0 || n.Name.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0)) return true;
+            // Hyper-V, WSL and similar switches are Ethernet; tunnels and PPP links with a gateway are almost always VPNs.
+            return (type == ppp || type == propVirtual || type == tunnel) && n.Description.IndexOf("Teredo", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         public static void Network(Report r)
         {
             var s = r.NewSection("Gaming: network");
@@ -105,6 +116,15 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Info, "Gaming: Playing over Wi-Fi", "Wi-Fi is more prone to latency spikes and packet loss than a cable.", "Use Ethernet if you can, or the router's 5 GHz or 6 GHz band.");
                 else if (main.Speed > 0 && main.Speed <= 100000000)
                     r.Find(Severity.Info, "Gaming: Wired link is 100 Mbps or slower", main.Description + " negotiated " + Fmt.Num(main.Speed / 1000000.0, "0") + " Mbps.", "A damaged or older cable often causes this. Try a Cat 5e or better cable.");
+            });
+
+            Guard.Try(s, "VPN", () =>
+            {
+                var vpn = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.OperationalStatus == OperationalStatus.Up && IsVpn(n) && Gateway(n) != null);
+                s.Add("VPN carrying internet traffic", vpn == null ? "No" : "Yes (" + vpn.Description + ")");
+                if (vpn != null)
+                    r.Find(Severity.Info, "Gaming: Connected through a VPN", vpn.Description + " carries the internet traffic, so games and the latency test below go through the VPN's server.",
+                        "A VPN usually adds latency. Turn it off while playing, or exclude games with the VPN's split tunnelling, unless you need it.");
             });
 
             if (r.NetworkTests)

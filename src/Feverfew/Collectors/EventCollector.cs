@@ -378,6 +378,22 @@ namespace Feverfew.Collectors
             if (gpu >= 3)
                 r.Find(Severity.Warning, "Graphics driver keeps resetting", gpu + " resets logged.", "Do a clean driver install, remove GPU overclocks, and check temperature and power cables.");
             if (throttle >= 10) Throttling(r, throttle, ev);
+
+            int conflicts = count("Tcpip", new[] { 4199 });
+            if (conflicts > 0)
+                r.Find(Severity.Warning, "IP address conflict on the network", "Windows saw another device using this PC's IP address " + conflicts + " time" + (conflicts == 1 ? "" : "s") + ". The connection can drop while that happens.",
+                    "Restart the router. If you set a fixed IP address on this PC or another device, pick one outside the router's DHCP range or reserve it in the router.");
+
+            // Intel's Wi-Fi drivers log as Netwtw04, Netwtw06 and so on.
+            var wifi = sys.Where(g => g.Provider.StartsWith("Netwtw", StringComparison.OrdinalIgnoreCase) && (g.Id == 5005 || g.Id == 5002)).ToList();
+            if (wifi.Sum(g => g.Count) > 0)
+            {
+                var msg = wifi.OrderByDescending(g => g.Count).First().Message;
+                var colon = msg.IndexOf(" :", StringComparison.Ordinal);
+                var adapter = colon > 0 ? msg.Substring(0, colon).Trim() : "The Intel Wi-Fi adapter";
+                r.Find(Severity.Info, "Wi-Fi adapter reported internal errors", adapter + " failed and reset itself " + wifi.Sum(g => g.Count) + " times.",
+                    "If Wi-Fi drops out, install the latest driver from Intel's site. If errors continue with a new driver, the Wi-Fi card may be failing.");
+            }
         }
 
         private static void BlueScreens(Report r, int count, Evidence ev)
