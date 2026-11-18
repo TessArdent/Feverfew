@@ -30,7 +30,22 @@ namespace Feverfew.Collectors
         private static string Describe(EventRecord e)
         {
             // Windows puts invisible direction marks around the dates in some messages.
-            try { return Fmt.Clip((e.FormatDescription() ?? "").Replace("\u200e", "").Replace("\u200f", ""), 260); }
+            string text = "";
+            try { text = (e.FormatDescription() ?? "").Replace("\u200e", "").Replace("\u200f", "").Trim(); }
+            catch (Exception) { }
+            if (text.Length == 0) text = RawData(e);
+            return Fmt.Clip(text, 260);
+        }
+
+        // Some drivers (nvlddmkm, for one) ship no message text, so show the values the event carries instead.
+        private static string RawData(EventRecord e)
+        {
+            try
+            {
+                var parts = e.Properties.Select(p => Convert.ToString(p.Value, CultureInfo.InvariantCulture)?.Trim())
+                    .Where(v => !string.IsNullOrEmpty(v) && v.Length < 400).ToList();
+                return parts.Count == 0 ? "" : "(no message text) " + string.Join(" \u00b7 ", parts);
+            }
             catch (Exception) { return ""; }
         }
 
@@ -149,7 +164,8 @@ namespace Feverfew.Collectors
             int badBlock = count("disk", new[] { 7 });
             int diskErr = count("disk", new[] { 11, 51, 52, 153, 154 }) + count("stornvme", new[] { 11, 129 }) + count("storahci", new[] { 11, 129 });
             int ntfs = count("Microsoft-Windows-Ntfs", new[] { 55, 98, 130, 137 });
-            int gpu = count("Display", new[] { 4101 });
+            // Windows logs a recovered driver timeout as Display 4101; NVIDIA's driver logs its own as nvlddmkm 153.
+            int gpu = count("Display", new[] { 4101 }) + count("nvlddmkm", new[] { 153 });
             int throttle = count("Microsoft-Windows-Kernel-Processor-Power", new[] { 37 });
 
             s.Add("Unexpected restarts (Kernel-Power 41)", kernelPower);
@@ -158,7 +174,7 @@ namespace Feverfew.Collectors
             s.Add("Hardware errors (WHEA)", wheaError + " fatal, " + wheaWarn + " corrected");
             s.Add("Disk errors", badBlock + " bad block, " + diskErr + " I/O or timeout");
             s.Add("File system errors (NTFS)", ntfs);
-            s.Add("Graphics driver resets (Display 4101)", gpu);
+            s.Add("Graphics driver resets (Display 4101, nvlddmkm 153)", gpu);
             s.Add("CPU speed limited by firmware (Processor-Power 37)", throttle);
 
             if (bugcheck > 0)
