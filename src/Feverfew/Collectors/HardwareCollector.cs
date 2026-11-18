@@ -151,14 +151,17 @@ namespace Feverfew.Collectors
                     var date = DriverDate(g.Str("PNPDeviceID")) ?? g.Date("DriverDate");
                     var mode = g.Long("CurrentHorizontalResolution") > 0
                         ? g.Str("CurrentHorizontalResolution") + " x " + g.Str("CurrentVerticalResolution") + " at " + g.Str("CurrentRefreshRate") + " Hz" : "Inactive";
-                    t.Rows.Add(new[] { g.Str("Name"), Fmt.Bytes(VideoMemory(g.Str("Name")) ?? g.Long("AdapterRAM")), g.Str("DriverVersion"), DateText(date), mode, g.Str("Status") });
+                    bool isVirtual = IsVirtualDisplay(g.Str("Name"));
+                    t.Rows.Add(new[] { g.Str("Name") + (isVirtual ? " (virtual)" : ""), Fmt.Bytes(VideoMemory(g.Str("Name")) ?? g.Long("AdapterRAM")), g.Str("DriverVersion"), DateText(date), mode, g.Str("Status") });
 
+                    if (isVirtual) continue;
                     if (g.Str("Name").IndexOf("Basic Display", StringComparison.OrdinalIgnoreCase) >= 0)
                         r.Find(Severity.Warning, "No proper graphics driver", "Windows is using the Microsoft Basic Display Adapter.", "Install the driver from NVIDIA, AMD, Intel, or the PC maker.");
                     else if (date != null && !IsPlaceholder(date.Value) && (DateTime.Now - date.Value).TotalDays > 365 * 2)
                         r.Find(Severity.Info, "Old graphics driver", g.Str("Name") + " has a driver dated " + Fmt.Date(date) + ".", "Update it from the graphics card maker's site if games or video misbehave.");
                 }
-                r.AddSummary("Graphics", string.Join(", ", gpus.Select(g => g.Str("Name"))));
+                var real = gpus.Where(g => !IsVirtualDisplay(g.Str("Name"))).ToList();
+                r.AddSummary("Graphics", string.Join(", ", (real.Count > 0 ? real : gpus).Select(g => g.Str("Name"))));
             });
 
             Guard.Try(s, "Monitors", () =>
@@ -174,6 +177,18 @@ namespace Feverfew.Collectors
                 foreach (var d in Wmi.Cim("SELECT Name, Status FROM Win32_SoundDevice"))
                     t.Rows.Add(new[] { d.Str("Name"), d.Str("Status") });
             });
+        }
+
+        // Display adapters that remote desktop, streaming and VM software add. They have no hardware, so driver age and refresh rate don't matter.
+        private static readonly string[] VirtualDisplayNames =
+        {
+            "Parsec Virtual", "Remote Display", "Remote Desktop", "Virtual Display", "IddCx", "Indirect Display", "spacedesk", "Citrix",
+            "VMware SVGA", "VirtualBox", "Hyper-V Video", "Hyper-V Display", "Meta Virtual Monitor", "Virtual Desktop Monitor", "GameViewer", "Sunshine", "Splashtop", "AnyDesk", "TeamViewer"
+        };
+
+        public static bool IsVirtualDisplay(string name)
+        {
+            return VirtualDisplayNames.Any(v => (name ?? "").IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         // Win32_VideoController.AdapterRAM stops at 4 GB; the driver's registry entry has the true size.

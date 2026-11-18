@@ -202,7 +202,7 @@ namespace Feverfew.Collectors
             Guard.Try(s, "Graphics adapters", () =>
             {
                 gpus = Wmi.Cim("SELECT Name, CurrentRefreshRate, MaxRefreshRate, CurrentHorizontalResolution FROM Win32_VideoController");
-                foreach (var g in gpus.Where(x => x.Long("CurrentHorizontalResolution") > 0))
+                foreach (var g in gpus.Where(x => x.Long("CurrentHorizontalResolution") > 0 && !HardwareCollector.IsVirtualDisplay(x.Str("Name"))))
                 {
                     long current = g.Long("CurrentRefreshRate") ?? 0, max = g.Long("MaxRefreshRate") ?? 0;
                     if (current <= 1 || max <= 1) continue;
