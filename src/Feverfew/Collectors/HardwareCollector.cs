@@ -81,7 +81,7 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Info, "Mixed memory modules", "The installed RAM sticks aren't an identical set.",
                         "Mixed kits usually work, but they're a common cause of random crashes when memory runs at higher speeds.");
 
-                var slow = sticks.Where(m => RatedSpeed(m) > 0 && m.Long("ConfiguredClockSpeed") > 0 && m.Long("ConfiguredClockSpeed") < RatedSpeed(m) * 0.9).ToList();
+                var slow = sticks.Where(m => RatedSpeed(m) > 0 && m.Long("ConfiguredClockSpeed") > 0 && m.Long("ConfiguredClockSpeed") < RatedSpeed(m) * 0.97).ToList(); // DDR5-5200 at its 4800 fallback is only 8% slow
                 if (slow.Count > 0)
                     r.Find(Severity.Info, "Memory is running below its rated speed",
                         "Rated " + RatedSpeed(slow[0]) + " MT/s, running at " + slow[0].Str("ConfiguredClockSpeed") + " MT/s.",
