@@ -28,6 +28,7 @@ namespace Feverfew.Collectors
             public readonly List<DateTime> Throttles = new List<DateTime>();
             public readonly List<uint> StopCodes = new List<uint>();
             public readonly List<string> SuspectDrivers = new List<string>();
+            public readonly List<string> DumpDrivers = new List<string>(); // from crash dumps in the last Days days
         }
 
         private static readonly int[] DiskErrorIds = { 11, 51, 52, 153, 154 };
@@ -118,11 +119,15 @@ namespace Feverfew.Collectors
         public static void Collect(Report r)
         {
             var s = r.NewSection("Crashes and event logs (last " + Days + " days)");
+            var dumps = new List<DumpFile>();
+            try { dumps = ReadDumps(); } catch (Exception) { /* the Crash dumps step reports the problem */ }
 
             Guard.Try(s, "System log", () =>
             {
                 var shutdowns = new List<string[]>();
                 var evidence = new Evidence();
+                foreach (var d in dumps.Where(d => d.Driver != null && d.File.LastWriteTime >= DateTime.Now.AddDays(-Days)))
+                    if (!evidence.DumpDrivers.Contains(d.Driver, StringComparer.OrdinalIgnoreCase)) evidence.DumpDrivers.Add(d.Driver);
                 var sys = Scan("System", e => { RecordShutdown(e, shutdowns); Track(e, evidence); });
                 Fill(s.Table("Most frequent System errors", "Count", "Last seen", "Source", "ID", "Message"), sys);
                 if (shutdowns.Count > 0)
@@ -155,7 +160,7 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Warning, "A program keeps crashing: " + worst.Key, worst.Value + " crashes in the last " + Days + " days.", "Update or reinstall it. The 'Program crashes' table names the faulting module.");
             });
 
-            Guard.Try(s, "Crash dumps", () => Dumps(r, s));
+            Guard.Try(s, "Crash dumps", () => Dumps(r, s, dumps));
         }
 
         private static void RecordShutdown(EventRecord e, List<string[]> rows)
@@ -244,15 +249,18 @@ namespace Feverfew.Collectors
             var detail = count == 1 ? "Windows recorded one stop error" : "Windows recorded " + count + " stop errors";
             if (codes.Count > 0) detail += ", with stop code" + (codes.Count == 1 ? " " : "s ") + string.Join(", ", codes.Take(4).Select(c => "0x" + c.ToString("X8", CultureInfo.InvariantCulture) + " (" + BugCheckName(c) + ")"));
             detail += ".";
-            if (ev.SuspectDrivers.Count > 0) detail += " Windows names " + string.Join(", ", ev.SuspectDrivers.Take(3)) + " as possibly related.";
+            if (ev.DumpDrivers.Count > 0) detail += " The crash dump" + (ev.DumpDrivers.Count == 1 ? " shows" : "s show") + " the failure in " + string.Join(", ", ev.DumpDrivers.Take(3)) + ".";
+            var others = ev.SuspectDrivers.Where(x => !ev.DumpDrivers.Contains(x, StringComparer.OrdinalIgnoreCase)).ToList();
+            if (others.Count > 0) detail += " Windows names " + string.Join(", ", others.Take(3)) + " as possibly related.";
+            bool named = ev.DumpDrivers.Count > 0 || ev.SuspectDrivers.Count > 0;
 
             string advice;
             if (count == 1)
-                advice = "A single blue screen can be a one-off. If it happens again, update " + (ev.SuspectDrivers.Count > 0 ? "the driver Windows named" : "the graphics, chipset and storage drivers") + " and check 'Recent crash dumps'.";
+                advice = "A single blue screen can be a one-off. If it happens again, update " + (named ? "the driver named above" : "the graphics, chipset and storage drivers") + " and check 'Recent crash dumps'.";
             else if (codes.Count > 1)
                 advice = "Different stop codes usually point to RAM, power or an unstable overclock. Remove any overclock and test the memory.";
             else
-                advice = "The same stop code each time usually points to a driver. " + (ev.SuspectDrivers.Count > 0 ? "Update or reinstall the one Windows named." : "Check 'Recent crash dumps' and update the drivers it suggests.");
+                advice = "The same stop code each time usually points to a driver. " + (named ? "Update or reinstall the one named above." : "Check 'Recent crash dumps' and update the drivers it suggests.");
             r.Find(count >= 3 ? Severity.Critical : Severity.Warning, count + " blue screen" + (count == 1 ? "" : "s") + " in " + Days + " days", detail, advice);
         }
 
@@ -364,22 +372,42 @@ namespace Feverfew.Collectors
                     : "One repeated code usually points to a driver. Opening a dump in Microsoft's WinDbg names it.");
         }
 
-        private static void Dumps(Report r, Section s)
+        private sealed class DumpFile
+        {
+            public FileInfo File; public uint? Code; public string Driver;
+        }
+
+        private static List<DumpFile> ReadDumps()
+        {
+            var list = new List<DumpFile>();
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Minidump");
+            if (!Scanner.IsElevated() || !Directory.Exists(dir)) return list;
+            foreach (var f in new DirectoryInfo(dir).GetFiles("*.dmp").OrderByDescending(f => f.LastWriteTime).Take(15))
+            {
+                var d = new DumpFile { File = f };
+                ReadDump(f.FullName, d);
+                list.Add(d);
+            }
+            return list;
+        }
+
+        private static void Dumps(Report r, Section s, List<DumpFile> dumps)
         {
             // Without admin rights the folder just looks absent, which would read as "no crashes".
             if (!Scanner.IsElevated()) throw new UnauthorizedAccessException();
-            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Minidump");
-            var t = s.Table("Recent crash dumps", "Date", "File", "Size", "Stop code", "Meaning");
+            var t = s.Table("Recent crash dumps", "Date", "File", "Size", "Stop code", "Meaning", "Faulting driver");
             var found = new List<KeyValuePair<DateTime, uint>>();
-            if (Directory.Exists(dir))
+            foreach (var d in dumps)
             {
-                foreach (var f in new DirectoryInfo(dir).GetFiles("*.dmp").OrderByDescending(f => f.LastWriteTime).Take(15))
+                if (d.Code != null) found.Add(new KeyValuePair<DateTime, uint>(d.File.LastWriteTime, d.Code.Value));
+                t.Rows.Add(new[]
                 {
-                    var code = ReadBugCheck(f.FullName);
-                    if (code != null) found.Add(new KeyValuePair<DateTime, uint>(f.LastWriteTime, code.Value));
-                    t.Rows.Add(new[] { Fmt.Seconds(f.LastWriteTime), f.Name, Fmt.Bytes(f.Length), code == null ? "Unreadable" : "0x" + code.Value.ToString("X8"), code == null ? "" : BugCheckName(code.Value) });
-                }
+                    Fmt.Seconds(d.File.LastWriteTime), d.File.Name, Fmt.Bytes(d.File.Length), d.Code == null ? "Unreadable" : "0x" + d.Code.Value.ToString("X8"),
+                    d.Code == null ? "" : BugCheckName(d.Code.Value), d.Driver ?? ""
+                });
             }
+            if (dumps.Any(d => d.Driver != null))
+                s.Note("The faulting driver is the one holding the code address the stop code reports. It's usually the cause, but a driver can also crash because another one corrupted memory.");
             RepeatedCrashes(r, found);
             if (t.Rows.Count > 0) s.Note("A crash dump's time is when Windows finished saving it, usually during the restart after the crash.");
             var full = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "MEMORY.DMP");
@@ -390,8 +418,22 @@ namespace Feverfew.Collectors
             }
         }
 
-        // Reads the stop code from the fixed header of a kernel dump. The dump's contents stay on the PC.
-        private static uint? ReadBugCheck(string path)
+        // Which stop code parameter holds the address of the code that failed. Others hold data addresses or status values.
+        private static int? CodeAddressParameter(uint code)
+        {
+            switch (code)
+            {
+                case 0x50: return 3;
+                case 0x0A: case 0xD1: case 0x100000D1: case 0xC5: return 4;
+                case 0x1E: case 0x3B: case 0x7E: case 0x1000007E: case 0x8E: case 0x1000008E: case 0x116: return 2;
+                default: return null;
+            }
+        }
+
+        // Reads the stop code from the fixed header of a kernel dump and, for a small (triage) dump, which loaded driver holds the
+        // failing code address. Layout: DUMP_HEADER64, then TRIAGE_DUMP64 at 0x2000 whose offsets are from the start of the file.
+        // The dump's contents stay on the PC.
+        private static void ReadDump(string path, DumpFile d)
         {
             try
             {
@@ -399,11 +441,37 @@ namespace Feverfew.Collectors
                 using (var br = new BinaryReader(fs))
                 {
                     var sig = new string(br.ReadChars(8));
-                    if (sig == "PAGEDU64") { fs.Position = 0x38; return br.ReadUInt32(); }
-                    if (sig == "PAGEDUMP") { fs.Position = 0x28; return br.ReadUInt32(); }
+                    if (sig == "PAGEDUMP") { fs.Position = 0x28; d.Code = br.ReadUInt32(); return; }
+                    if (sig != "PAGEDU64") return;
+                    fs.Position = 0x38; d.Code = br.ReadUInt32();
+                    var param = CodeAddressParameter(d.Code.Value);
+                    fs.Position = 0x40; var p = new ulong[4]; for (int i = 0; i < 4; i++) p[i] = br.ReadUInt64();
+                    fs.Position = 0xF98; const uint triage = 4;
+                    if (param == null || br.ReadUInt32() != triage) return;
+                    d.Driver = DriverAt(fs, br, p[param.Value - 1]);
                 }
             }
-            catch (Exception) { }
+            catch (Exception) { /* keep whatever was read */ }
+        }
+
+        private static string DriverAt(FileStream fs, BinaryReader br, ulong address)
+        {
+            const long triageHeader = 0x2000, entrySize = 0x90, dllBase = 8 + 0x30, sizeOfImage = 8 + 0x40;
+            fs.Position = triageHeader + 0x30;
+            uint listOffset = br.ReadUInt32(), count = br.ReadUInt32();
+            if (count == 0 || count > 4096 || listOffset + count * entrySize > fs.Length) return null;
+            for (long i = 0; i < count; i++)
+            {
+                long entry = listOffset + i * entrySize;
+                fs.Position = entry; uint nameOffset = br.ReadUInt32();
+                fs.Position = entry + dllBase; ulong start = br.ReadUInt64();
+                fs.Position = entry + sizeOfImage; uint size = br.ReadUInt32();
+                if (address < start || address >= start + size) continue;
+                if (nameOffset + 4 > fs.Length) return null;
+                fs.Position = nameOffset; uint chars = br.ReadUInt32();
+                if (chars == 0 || chars > 260 || nameOffset + 4 + chars * 2 > fs.Length) return null;
+                return System.Text.Encoding.Unicode.GetString(br.ReadBytes((int)chars * 2));
+            }
             return null;
         }
 
