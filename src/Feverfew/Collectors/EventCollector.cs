@@ -21,6 +21,46 @@ namespace Feverfew.Collectors
             public string Provider; public int Id; public int Count; public DateTime? Last; public byte Level; public string Message;
         }
 
+        // Details gathered while reading the System log, so findings can name the disk, the boot and the driver.
+        private sealed class Evidence
+        {
+            public readonly Dictionary<int, int> DiskErrors = new Dictionary<int, int>(); // disk number, or -1 when only the controller is named
+            public readonly List<DateTime> Throttles = new List<DateTime>();
+            public readonly List<uint> StopCodes = new List<uint>();
+            public readonly List<string> SuspectDrivers = new List<string>();
+        }
+
+        private static readonly int[] DiskErrorIds = { 11, 51, 52, 153, 154 };
+        private static readonly int[] ControllerErrorIds = { 11, 129 };
+
+        private static bool Is(EventRecord e, string provider) { return string.Equals(e.ProviderName, provider, StringComparison.OrdinalIgnoreCase); }
+
+        private static void Track(EventRecord e, Evidence ev)
+        {
+            if ((Is(e, "disk") && DiskErrorIds.Contains(e.Id)) || ((Is(e, "stornvme") || Is(e, "storahci")) && ControllerErrorIds.Contains(e.Id)))
+            {
+                int disk = -1;
+                var values = string.Join(" ", e.Properties.Select(p => p.Value as string).Where(v => v != null));
+                var m = System.Text.RegularExpressions.Regex.Match(values, @"Harddisk(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (!m.Success && Is(e, "disk")) m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"\bDisk (\d+)\b");
+                if (m.Success) disk = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                int c; ev.DiskErrors.TryGetValue(disk, out c); ev.DiskErrors[disk] = c + 1;
+            }
+            else if (Is(e, "Microsoft-Windows-Kernel-Processor-Power") && e.Id == 37 && e.TimeCreated != null)
+                ev.Throttles.Add(e.TimeCreated.Value);
+            else if (Is(e, "Microsoft-Windows-WER-SystemErrorReporting") && e.Id == 1001 || Is(e, "BugCheck") && e.Id == 1001)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"0x([0-9a-fA-F]{8})");
+                uint code;
+                if (m.Success && uint.TryParse(m.Groups[1].Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out code)) ev.StopCodes.Add(code);
+            }
+            else if (Is(e, "Microsoft-Windows-WER-SystemErrorReporting") && e.Id == 1019)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"driver:\s*([\w.-]+\.sys)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (m.Success && !ev.SuspectDrivers.Contains(m.Groups[1].Value, StringComparer.OrdinalIgnoreCase)) ev.SuspectDrivers.Add(m.Groups[1].Value);
+            }
+        }
+
         private static string Query(string levels)
         {
             long ms = Days * 86400000L;
@@ -82,7 +122,8 @@ namespace Feverfew.Collectors
             Guard.Try(s, "System log", () =>
             {
                 var shutdowns = new List<string[]>();
-                var sys = Scan("System", e => RecordShutdown(e, shutdowns));
+                var evidence = new Evidence();
+                var sys = Scan("System", e => { RecordShutdown(e, shutdowns); Track(e, evidence); });
                 Fill(s.Table("Most frequent System errors", "Count", "Last seen", "Source", "ID", "Message"), sys);
                 if (shutdowns.Count > 0)
                 {
@@ -90,7 +131,7 @@ namespace Feverfew.Collectors
                     t.Rows.AddRange(shutdowns);
                     s.Note("Windows logs these when the PC starts again, so the crash itself came earlier. An 'improper shutdown' message gives Windows' last recorded time before the stop.");
                 }
-                Analyze(r, s, sys);
+                Analyze(r, s, sys, evidence);
             });
 
             Guard.Try(s, "Application log", () =>
@@ -126,6 +167,8 @@ namespace Feverfew.Collectors
                 rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Improper shutdown", Describe(e) });
             else if ((e.ProviderName == "Microsoft-Windows-WER-SystemErrorReporting" || e.ProviderName == "BugCheck") && e.Id == 1001)
                 rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Blue screen", Describe(e) });
+            else if (e.ProviderName == "Microsoft-Windows-WER-SystemErrorReporting" && e.Id == 1019)
+                rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Blue screen driver hint", Describe(e) });
         }
 
         private static string UnexpectedRestartDetail(EventRecord e)
@@ -151,7 +194,7 @@ namespace Feverfew.Collectors
                 t.Rows.Add(new[] { g.Count.ToString(), Fmt.Time(g.Last), g.Provider, g.Id.ToString(), g.Message });
         }
 
-        private static void Analyze(Report r, Section s, List<Group> sys)
+        private static void Analyze(Report r, Section s, List<Group> sys, Evidence ev)
         {
             Func<string, int[], int> count = (provider, ids) =>
                 sys.Where(g => string.Equals(g.Provider, provider, StringComparison.OrdinalIgnoreCase) && (ids == null || ids.Contains(g.Id))).Sum(g => g.Count);
@@ -177,8 +220,7 @@ namespace Feverfew.Collectors
             s.Add("Graphics driver resets (Display 4101, nvlddmkm 153)", gpu);
             s.Add("CPU speed limited by firmware (Processor-Power 37)", throttle);
 
-            if (bugcheck > 0)
-                r.Find(bugcheck >= 3 ? Severity.Critical : Severity.Warning, bugcheck + " blue screen" + (bugcheck == 1 ? "" : "s") + " in " + Days + " days", "Windows recorded stop errors.", "Check 'Recent crash dumps' for the stop codes. Repeated different codes usually point to RAM, power or overclocking; a repeated single code usually points to a driver.");
+            if (bugcheck > 0) BlueScreens(r, bugcheck, ev);
             NoisyDrivers(r, sys);
             if (kernelPower > bugcheck)
                 r.Find(kernelPower >= 3 ? Severity.Critical : Severity.Warning, kernelPower + " unexpected restart" + (kernelPower == 1 ? "" : "s"), "The PC stopped without shutting down cleanly, and some of those restarts had no blue screen.", "Suspect the power supply, overheating, unstable overclocks, or someone holding the power button.");
@@ -188,14 +230,103 @@ namespace Feverfew.Collectors
                 r.Find(Severity.Warning, "Repeated corrected hardware errors", wheaWarn + " corrected WHEA events. Often a PCIe link or an unstable overclock.", "Reseat the graphics card and NVMe drive, then update the BIOS.");
             if (badBlock > 0)
                 r.Find(Severity.Critical, "Bad blocks reported on a disk", badBlock + " bad block events.", "Back up now, then test the drive with its maker's tool.");
-            if (diskErr >= 5)
-                r.Find(Severity.Warning, "Disk I/O errors or timeouts", diskErr + " events.", "Check or replace the SATA cable, reseat the drive, and update the storage driver or firmware.");
+            if (diskErr >= 5) DiskErrors(r, diskErr, ev);
             if (ntfs > 0)
                 r.Find(Severity.Warning, "File system errors", ntfs + " NTFS events.", "Run chkdsk /scan and check the drive's health.");
             if (gpu >= 3)
                 r.Find(Severity.Warning, "Graphics driver keeps resetting", gpu + " resets logged.", "Do a clean driver install, remove GPU overclocks, and check temperature and power cables.");
-            if (throttle >= 10)
-                r.Find(Severity.Warning, "CPU speed is being limited by firmware", throttle + " throttling events. Usually heat or a weak power adapter.", "Clean the cooler and check the charger or power supply.");
+            if (throttle >= 10) Throttling(r, throttle, ev);
+        }
+
+        private static void BlueScreens(Report r, int count, Evidence ev)
+        {
+            var codes = ev.StopCodes.Distinct().ToList();
+            var detail = count == 1 ? "Windows recorded one stop error" : "Windows recorded " + count + " stop errors";
+            if (codes.Count > 0) detail += ", with stop code" + (codes.Count == 1 ? " " : "s ") + string.Join(", ", codes.Take(4).Select(c => "0x" + c.ToString("X8", CultureInfo.InvariantCulture) + " (" + BugCheckName(c) + ")"));
+            detail += ".";
+            if (ev.SuspectDrivers.Count > 0) detail += " Windows names " + string.Join(", ", ev.SuspectDrivers.Take(3)) + " as possibly related.";
+
+            string advice;
+            if (count == 1)
+                advice = "A single blue screen can be a one-off. If it happens again, update " + (ev.SuspectDrivers.Count > 0 ? "the driver Windows named" : "the graphics, chipset and storage drivers") + " and check 'Recent crash dumps'.";
+            else if (codes.Count > 1)
+                advice = "Different stop codes usually point to RAM, power or an unstable overclock. Remove any overclock and test the memory.";
+            else
+                advice = "The same stop code each time usually points to a driver. " + (ev.SuspectDrivers.Count > 0 ? "Update or reinstall the one Windows named." : "Check 'Recent crash dumps' and update the drivers it suggests.");
+            r.Find(count >= 3 ? Severity.Critical : Severity.Warning, count + " blue screen" + (count == 1 ? "" : "s") + " in " + Days + " days", detail, advice);
+        }
+
+        private static void DiskErrors(Report r, int total, Evidence ev)
+        {
+            var disks = new Dictionary<long, Row>();
+            try { foreach (var d in Wmi.Query(@"root\Microsoft\Windows\Storage", "SELECT Number, FriendlyName, BusType FROM MSFT_Disk")) if (d.Long("Number") != null) disks[d.Long("Number").Value] = d; }
+            catch (Exception) { /* name the disks by number only */ }
+
+            Func<int, string> bus = n => { Row d; return disks.TryGetValue(n, out d) ? StorageCollector.BusType(d.Long("BusType")) : null; };
+            var parts = ev.DiskErrors.OrderByDescending(kv => kv.Value).Select(kv =>
+            {
+                if (kv.Key < 0) return kv.Value + " from the storage controller";
+                Row d;
+                return disks.TryGetValue(kv.Key, out d)
+                    ? kv.Value + " on disk " + kv.Key + " (" + d.Str("FriendlyName") + ", " + bus(kv.Key) + ")"
+                    : kv.Value + " on disk " + kv.Key + ", which isn't connected now";
+            }).ToList();
+            var detail = total + " events" + (parts.Count > 0 ? ": " + string.Join("; ", parts) + "." : ".");
+
+            var worst = ev.DiskErrors.OrderByDescending(kv => kv.Value).Select(kv => (int?)kv.Key).FirstOrDefault();
+            bool allGone = ev.DiskErrors.Count > 0 && ev.DiskErrors.Keys.All(k => k >= 0 && !disks.ContainsKey(k)) && disks.Count > 0;
+            string b = worst != null && worst >= 0 ? bus(worst.Value) : null;
+            string advice;
+            if (allGone)
+                advice = "The errors came from a disk that isn't connected now, often a USB drive or memory card, so the internal drive isn't affected. If you still use that disk, copy its files off and try another port or cable.";
+            else if (b == "USB" || b == "SD")
+                advice = "Try another USB port and cable. If the errors continue, the drive itself may be failing, so copy its files off.";
+            else if (b == "NVMe" || b == "RAID")
+                advice = "Back up first. Then update the storage driver (Intel RST on many laptops) and the SSD's firmware, and check the drive's temperature.";
+            else if (b == "SATA" || b == "ATA")
+                advice = "Check or replace the SATA cable, reseat the drive, and update the storage driver or firmware.";
+            else
+                advice = "Back up first, then update the storage driver and the drive's firmware. On a desktop, reseat the drive and its cable.";
+            r.Find(allGone ? Severity.Info : Severity.Warning, "Disk I/O errors or timeouts", detail, advice);
+        }
+
+        private static void Throttling(Report r, int count, Evidence ev)
+        {
+            bool laptop = false;
+            try
+            {
+                laptop = Wmi.Cim("SELECT PCSystemType FROM Win32_ComputerSystem").FirstOrDefault()?.Long("PCSystemType") == 2
+                    || Wmi.Cim("SELECT Name FROM Win32_Battery").Count > 0;
+            }
+            catch (Exception) { }
+
+            var boots = new List<DateTime>();
+            try
+            {
+                var q = new EventLogQuery("System", PathType.LogName,
+                    "*[System[Provider[@Name='Microsoft-Windows-Kernel-General'] and EventID=12 and TimeCreated[timediff(@SystemTime) <= " + Days * 86400000L + "]]]");
+                using (var reader = new EventLogReader(q))
+                {
+                    EventRecord e;
+                    while ((e = reader.ReadEvent()) != null) using (e) if (e.TimeCreated != null) boots.Add(e.TimeCreated.Value);
+                }
+            }
+            catch (Exception) { }
+            boots.Sort();
+
+            // Which start each event belongs to, and how long after that start it came.
+            var placed = ev.Throttles.Select(t => new { Time = t, Boot = boots.LastOrDefault(b => b <= t) }).ToList();
+            bool startupOnly = boots.Count > 0 && placed.Count > 0 && placed.All(p => p.Boot != default(DateTime) && (p.Time - p.Boot).TotalMinutes <= 5);
+            int bootsHit = placed.Where(p => p.Boot != default(DateTime)).Select(p => p.Boot).Distinct().Count();
+            var detail = count + " throttling events" + (boots.Count > 0 ? " across " + bootsHit + " of " + boots.Count + " starts in " + Days + " days" : "") + ".";
+
+            if (startupOnly)
+                r.Find(Severity.Info, "CPU speed limited by firmware at startup", detail + " All came within five minutes of Windows starting, which is common and usually harmless.",
+                    "Nothing to do unless games or apps stutter later. If they do, check CPU temperatures with a tool such as HWiNFO.");
+            else
+                r.Find(Severity.Warning, "CPU speed is being limited by firmware", detail + (laptop ? " Usually heat or a weak power adapter." : " Usually heat or power limits."),
+                    laptop ? "Clean the vents and fan, use the original charger, and check the power mode in Settings > System > Power."
+                           : "Check that the CPU cooler is seated and its fan spins, clean out dust, and check the power supply and the BIOS power limits.");
         }
 
         private static void NoisyDrivers(Report r, List<Group> sys)

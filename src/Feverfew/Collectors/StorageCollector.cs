@@ -186,7 +186,7 @@ namespace Feverfew.Collectors
 
         private static string MediaType(long? v) { return v == 3 ? "HDD" : v == 4 ? "SSD" : v == 5 ? "SCM" : "Unknown"; }
 
-        private static string BusType(long? v)
+        public static string BusType(long? v)
         {
             switch (v)
             {
