@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -263,6 +264,48 @@ namespace Feverfew.Collectors
                 if (unsigned.Count > 0)
                     r.Find(Severity.Warning, "Unsigned drivers installed", string.Join(", ", unsigned.Take(5).Select(d => d.Str("DeviceName"))), "Replace them with signed drivers from the device maker.");
             });
+
+            Guard.Try(s, "Other kernel drivers", () => KernelDrivers(s));
+        }
+
+        // Drivers that belong to no device, such as anti-cheat, antivirus, VPN and backup software. They run in the kernel,
+        // so they're common causes of blue screens, but the device driver list above doesn't show them.
+        private static void KernelDrivers(Section s)
+        {
+            var deviceServices = new HashSet<string>(Wmi.Cim("SELECT Service FROM Win32_PnPEntity").Select(d => d.Str("Service")).Where(v => v.Length > 0), StringComparer.OrdinalIgnoreCase);
+            var t = s.Table("Other third-party kernel drivers", "Driver", "Name", "Company", "Version", "Kind", "Starts", "Running");
+            var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            foreach (var d in Wmi.Cim("SELECT Name, DisplayName, PathName, StartMode, State FROM Win32_SystemDriver").OrderBy(d => d.Str("Name")))
+            {
+                var name = d.Str("Name");
+                if (deviceServices.Contains(name)) continue;
+                bool running = d.Str("State") == "Running";
+                var start = d.Str("StartMode");
+                // Windows ships dozens of storage and network drivers from other makers that never load; only list what's loaded or set to load.
+                if (!running && start != "Boot" && start != "System" && start != "Auto") continue;
+                if (d.Str("DisplayName").StartsWith("Microsoft ", StringComparison.OrdinalIgnoreCase)) continue;
+                var path = DriverPath(d.Str("PathName"), windows);
+                if (path == null || !System.IO.File.Exists(path)) continue;
+                var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(path);
+                var company = (info.CompanyName ?? "").Trim();
+                if (company.IndexOf("Microsoft", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
+                var kind = "Kernel driver";
+                var altitude = Reg.Machine(@"SYSTEM\CurrentControlSet\Services\" + name + @"\Instances\" + (Reg.Machine(@"SYSTEM\CurrentControlSet\Services\" + name + @"\Instances", "DefaultInstance") as string ?? ""), "Altitude") as string;
+                if (altitude != null) kind = "File system filter (altitude " + altitude + ")";
+                t.Rows.Add(new[] { System.IO.Path.GetFileName(path), d.Str("DisplayName"), company.Length > 0 ? company : "Unknown", (info.FileVersion ?? "").Trim(), kind, d.Str("StartMode"), Fmt.YesNo(running) });
+            }
+            s.Note("Other third-party kernel drivers lists drivers that belong to no device, such as anti-cheat, antivirus, VPN and backup software. They're a common cause of blue screens, so compare them with a crash dump's faulting driver.");
+        }
+
+        private static string DriverPath(string raw, string windows)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var p = raw.Trim().Trim('"');
+            if (p.StartsWith(@"\??\", StringComparison.Ordinal)) p = p.Substring(4);
+            if (p.StartsWith(@"\SystemRoot\", StringComparison.OrdinalIgnoreCase)) p = System.IO.Path.Combine(windows, p.Substring(12));
+            else if (p.StartsWith(@"System32\", StringComparison.OrdinalIgnoreCase) || p.StartsWith(@"SysWOW64\", StringComparison.OrdinalIgnoreCase)) p = System.IO.Path.Combine(windows, p);
+            return System.IO.Path.IsPathRooted(p) ? p : null;
         }
 
         // Win32_PnPSignedDriver swaps the day and month of driver dates (DriverVer=09/03/2026 comes back as 9 March),
