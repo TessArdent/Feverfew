@@ -12,7 +12,7 @@ Named after feverfew, a daisy-like flower long used as a home remedy.
 
 Reports are saved in `Feverfew Reports` in your Documents folder.
 
-From the release after 1.3.0, `setup.exe` is signed (and timestamped) by the publisher's own code-signing authority, not one Windows already knows. Windows doesn't trust that authority, so on your PC SmartScreen may still warn about it or show "Unknown publisher". Choose **More info**, then **Run anyway**. Feverfew checks the signature itself when it updates (see [Updates](#updates)). Versions up to 1.3.0 weren't signed. Each release lists the file's SHA-256 hash so you can check your download.
+From 1.4.0, `setup.exe` is signed (and timestamped) by the publisher's own code-signing authority, not one Windows already knows. Windows doesn't trust that authority, so on your PC SmartScreen may still warn about it or show "Unknown publisher". Choose **More info**, then **Run anyway**. Feverfew checks the signature itself when it updates (see [Updates](#updates)). Versions up to 1.3.0 weren't signed. Each release lists the file's SHA-256 hash so you can check your download.
 
 ## What it collects
 
