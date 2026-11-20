@@ -192,19 +192,52 @@ namespace Feverfew.Collectors
 
             Guard.Try(s, "BitLocker", () =>
             {
-                var t = s.Table("Drive encryption", "Drive", "BitLocker protection");
-                foreach (var v in Wmi.Query(@"root\cimv2\Security\MicrosoftVolumeEncryption", "SELECT DriveLetter, ProtectionStatus FROM Win32_EncryptableVolume"))
+                var t = s.Table("Drive encryption", "Drive", "BitLocker protection", "Recovery password");
+                foreach (var v in Wmi.Query(@"root\cimv2\Security\MicrosoftVolumeEncryption", "SELECT DeviceID, DriveLetter, ProtectionStatus FROM Win32_EncryptableVolume"))
                 {
                     if (v.Str("DriveLetter").Length == 0) continue;
                     var p = v.Long("ProtectionStatus");
-                    t.Rows.Add(new[] { v.Str("DriveLetter"), p == 1 ? "On" : p == 0 ? "Off" : "Unknown (the drive may be locked)" });
-                    if (p == 1)
+                    var recovery = p == 1 ? HasRecoveryPassword(v.Str("DeviceID")) : null;
+                    t.Rows.Add(new[] { v.Str("DriveLetter"), p == 1 ? "On" : p == 0 ? "Off" : "Unknown (the drive may be locked)", recovery == null ? "-" : Fmt.YesNo(recovery) });
+                    if (p == 1 && recovery == false)
+                        r.Find(Severity.Warning, "BitLocker on " + v.Str("DriveLetter") + " has no recovery password",
+                            "If BitLocker asks for a recovery key after a BIOS, TPM or hardware change, there is no 48-digit password to type in.",
+                            "From an administrator prompt run: manage-bde -protectors -add " + v.Str("DriveLetter") + " -RecoveryPassword, then save the password somewhere safe off this PC.");
+                    else if (p == 1)
                         r.Find(Severity.Info, "BitLocker is on for " + v.Str("DriveLetter"),
                             "Motherboard, BIOS or TPM changes can trigger a request for the recovery key.",
                             "Make sure the owner can find the key (usually at account.microsoft.com/devices/recoverykey) before changing hardware or firmware.");
                 }
             });
 
+            VirtualizationSecurity(s);
+        }
+
+        // Asks BitLocker whether the volume has a numerical recovery password protector. Only protector IDs come back, never the
+        // password itself. Null when it can't tell.
+        private static bool? HasRecoveryPassword(string deviceId)
+        {
+            const uint numericalPassword = 3;
+            try
+            {
+                using (var vol = new System.Management.ManagementObject(@"root\cimv2\Security\MicrosoftVolumeEncryption",
+                    "Win32_EncryptableVolume.DeviceID='" + deviceId.Replace(@"\", @"\\").Replace("'", @"\'") + "'", null))
+                using (var input = vol.GetMethodParameters("GetKeyProtectors"))
+                {
+                    input["KeyProtectorType"] = numericalPassword;
+                    using (var output = vol.InvokeMethod("GetKeyProtectors", input, null))
+                    {
+                        if (output == null || Convert.ToUInt32(output["ReturnValue"]) != 0) return null;
+                        var ids = output["VolumeKeyProtectorID"] as string[];
+                        return ids != null && ids.Length > 0;
+                    }
+                }
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static void VirtualizationSecurity(Section s)
+        {
             Guard.Try(s, "Virtualization-based security", () =>
             {
                 var d = Wmi.Query(@"root\Microsoft\Windows\DeviceGuard", "SELECT * FROM Win32_DeviceGuard").FirstOrDefault();
@@ -226,6 +259,12 @@ namespace Feverfew.Collectors
         {
             var s = r.NewSection("Windows 11 readiness");
             var g = r.Signals;
+            const int firstWindows11Build = 22000;
+            if (g.WindowsBuild >= firstWindows11Build)
+            {
+                s.Add("Status", "Already running Windows 11");
+                return;
+            }
             var t = s.Table("Requirements", "Requirement", "This PC", "Result");
             Action<string, string, bool?> row = (name, value, pass) =>
                 t.Rows.Add(new[] { name, value, pass == null ? "Could not check" : pass.Value ? "Pass" : "Fail" });

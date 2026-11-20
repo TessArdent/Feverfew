@@ -85,6 +85,17 @@ namespace Feverfew.Collectors
             s.Note("Game Mode and recording are per-user settings. If a different account approved the Windows permission prompt, these values are that account's.");
         }
 
+        private static readonly string[] VpnNames = { "WireGuard", "Wintun", "TAP-Windows", "OpenVPN", "Mullvad", "NordLynx", "NordVPN", "ProtonVPN", "ExpressVPN", "Surfshark", "Cisco AnyConnect", "Fortinet", "GlobalProtect", "PANGP", "Cloudflare WARP", "Windscribe", "PIA ", "Private Internet Access" };
+
+        private static bool IsVpn(NetworkInterface n)
+        {
+            int type = (int)n.NetworkInterfaceType;
+            const int ppp = 23, propVirtual = 53, tunnel = 131;
+            if (VpnNames.Any(v => n.Description.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0 || n.Name.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0)) return true;
+            // Hyper-V, WSL and similar switches are Ethernet; tunnels and PPP links with a gateway are almost always VPNs.
+            return (type == ppp || type == propVirtual || type == tunnel) && n.Description.IndexOf("Teredo", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         public static void Network(Report r)
         {
             var s = r.NewSection("Gaming: network");
@@ -105,6 +116,15 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Info, "Gaming: Playing over Wi-Fi", "Wi-Fi is more prone to latency spikes and packet loss than a cable.", "Use Ethernet if you can, or the router's 5 GHz or 6 GHz band.");
                 else if (main.Speed > 0 && main.Speed <= 100000000)
                     r.Find(Severity.Info, "Gaming: Wired link is 100 Mbps or slower", main.Description + " negotiated " + Fmt.Num(main.Speed / 1000000.0, "0") + " Mbps.", "A damaged or older cable often causes this. Try a Cat 5e or better cable.");
+            });
+
+            Guard.Try(s, "VPN", () =>
+            {
+                var vpn = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.OperationalStatus == OperationalStatus.Up && IsVpn(n) && Gateway(n) != null);
+                s.Add("VPN carrying internet traffic", vpn == null ? "No" : "Yes (" + vpn.Description + ")");
+                if (vpn != null)
+                    r.Find(Severity.Info, "Gaming: Connected through a VPN", vpn.Description + " carries the internet traffic, so games and the latency test below go through the VPN's server.",
+                        "A VPN usually adds latency. Turn it off while playing, or exclude games with the VPN's split tunnelling, unless you need it.");
             });
 
             if (r.NetworkTests)
@@ -202,7 +222,17 @@ namespace Feverfew.Collectors
             Guard.Try(s, "Graphics adapters", () =>
             {
                 gpus = Wmi.Cim("SELECT Name, CurrentRefreshRate, MaxRefreshRate, CurrentHorizontalResolution FROM Win32_VideoController");
-                foreach (var g in gpus.Where(x => x.Long("CurrentHorizontalResolution") > 0))
+                var displays = DisplayInfo.Active().Where(d => !HardwareCollector.IsVirtualDisplay(d.Adapter)).ToList();
+                foreach (var d in displays)
+                {
+                    if (d.Hz <= 1) continue;
+                    s.Add("Refresh rate (" + d.Name + ")", d.Hz + " Hz, up to " + d.MaxHzAtResolution + " Hz at " + d.Width + " x " + d.Height);
+                    if (d.MaxHzAtResolution > d.Hz + 1)
+                        r.Find(Severity.Info, "Gaming: " + d.Name + " is below its highest refresh rate", "Running at " + d.Hz + " Hz, and it supports up to " + d.MaxHzAtResolution + " Hz at this resolution.",
+                            "Choose the higher rate in Settings > System > Display > Advanced display.");
+                }
+                // Per-adapter figures only when the monitor list isn't available.
+                foreach (var g in gpus.Where(x => displays.Count == 0 && x.Long("CurrentHorizontalResolution") > 0 && !HardwareCollector.IsVirtualDisplay(x.Str("Name"))))
                 {
                     long current = g.Long("CurrentRefreshRate") ?? 0, max = g.Long("MaxRefreshRate") ?? 0;
                     if (current <= 1 || max <= 1) continue;
@@ -243,7 +273,7 @@ namespace Feverfew.Collectors
                 var bar = i < bars.Count ? bars[i] : (long?)null;
                 t.Rows.Add(new[]
                 {
-                    c[0], c[1], c[2], c[3] + " °C", c[4] + "%", c[5] + " W / " + c[6] + " W",
+                    c[0], c[1], c[2], Whole(c[3]) + " °C", Whole(c[4]) + "%", Whole(c[5]) + " W / " + Whole(c[6]) + " W",
                     "Gen " + c[7] + " x" + c[9] + " / Gen " + c[8] + " x" + c[10],
                     bar == null ? "Unknown" : bar >= 1024 ? "On" : "Off"
                 });
@@ -344,6 +374,13 @@ namespace Feverfew.Collectors
             new GraphicsTip { Vendor = "AMD", Name = "Smart Access Memory", Text = "Needs Resizable BAR to be on in BIOS setup, and can then be checked in AMD Software." },
             new GraphicsTip { Vendor = "AMD", Name = "Radeon Chill", Text = "Leave it off for the highest frame rates. It's meant for saving power and heat." }
         };
+
+        // nvidia-smi prints values like 39.27 and 250.00; whole numbers read better.
+        private static string Whole(string v)
+        {
+            double d;
+            return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out d) ? Fmt.Num(d, "0") : v;
+        }
 
         public static List<GraphicsTip> TipsForThisPc()
         {

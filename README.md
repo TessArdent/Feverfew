@@ -20,17 +20,17 @@ Reports are saved in `Feverfew Reports` in your Documents folder.
 | --- | --- |
 | Motherboard and BIOS | Maker, model, revision, BIOS version and date, UEFI or Legacy boot, Secure Boot |
 | Boot and Secure Boot | Setup Mode, platform key, allowed and revoked signature counts, trusted certificates, the BIOS's default keys, Windows' Secure Boot certificate update status, firmware boot entries, EFI boot loaders and who signed them, and whether the firmware trusts the Windows boot file |
-| TPM and security | TPM version, maker and state, BitLocker on or off, virtualization-based security, antivirus, firewall |
-| Processor and memory | CPU model, cores, speeds, each RAM module, rated speed (from the part number when Windows reports only the fallback speed), actual speed, slots used |
-| Graphics and devices | GPU and driver details, monitors, sound, USB devices, devices with errors, third-party drivers |
-| Storage | Drive type and health, SMART failure prediction, temperature, wear, power-on hours, GPT or MBR for each disk, every partition (including EFI and recovery), unallocated space, fixed and removable volumes, free space |
-| Windows | Edition, build, activation, uptime, pending restarts, recent updates, power settings |
-| Software | Installed programs, startup programs, stopped services, top memory use |
-| Crashes | Blue screen stop codes, repeated stop codes, the time of each unexpected shutdown, drivers logging large numbers of errors, hardware (WHEA) errors, disk errors, program crashes, last 30 days of event log errors |
-| Network | Adapters, addresses, DNS, proxy, router, internet and name lookup tests |
-| Gaming | Power plan, Game Mode, background recording, GPU scheduling, memory integrity, connection type, latency, jitter and packet loss, TCP and network adapter settings, NVIDIA power, PCIe and Resizable BAR details, AMD driver details, refresh rate |
+| TPM and security | TPM version, maker and state, BitLocker on or off and whether each drive has a recovery password, virtualization-based security, antivirus, firewall |
+| Processor and memory | CPU model, cores, live speed and load, virtualization (including when Windows' own hypervisor uses it), each RAM module, rated speed (from the part number when Windows reports only the fallback speed), actual speed, slots used, soldered memory |
+| Graphics and devices | GPU and driver details (with real driver dates, and placeholder dates marked), virtual display adapters, each monitor's connection, resolution and refresh rate, monitors plugged into the motherboard instead of the graphics card, sound, USB devices, devices with errors, third-party drivers, third-party kernel drivers that belong to no device (antivirus, VPN, anti-cheat) |
+| Storage | Drive type and health, SMART failure prediction, NVMe health read straight from the drive (temperature, wear, spare, media errors, unsafe shutdowns, power-on hours, data written), GPT or MBR for each disk, every partition (including EFI and recovery), unallocated space, fixed and removable volumes, free space |
+| Windows | Edition, build, activation, uptime, pending restarts, recent updates, power settings, Fast Startup, System Protection and restore points, the recovery environment |
+| Software | Installed programs, startup programs, stopped services (with ones that normally stop by themselves marked), top memory use |
+| Crashes | Blue screen stop codes, repeated stop codes, the driver each crash dump points to, the events leading up to each unexpected restart, drivers logging large numbers of errors, hardware (WHEA) errors by source, disk errors for each disk, CPU throttling, graphics driver resets, program crashes, last 30 days of event log errors (with usually harmless ones marked) |
+| Network | Adapters and their type, addresses, DNS, proxy, router, VPNs carrying internet traffic, IP address conflicts, Wi-Fi adapter failures, internet and name lookup tests |
+| Gaming | Power plan, Game Mode, background recording, GPU scheduling, memory integrity, connection type, latency, jitter and packet loss, TCP and network adapter settings, NVIDIA power, PCIe and Resizable BAR details, AMD driver details, each monitor's refresh rate |
 | AMD drive writes | Whether AMD's driver is constantly rewriting a file on the Windows drive (a known bug fixed in AMD Software 26.11.1), its write rate, and an estimate of what it has written to each drive and how much SSD wear that caused |
-| Battery | Charge, wear, cycles (laptops) |
+| Battery | Charge, wear, cycles, a note when it holds under 80% of its design capacity (laptops) |
 | Windows 11 | Readiness for each hardware requirement, except Microsoft's supported CPU list |
 
 The report comes as an `.html` file to read and a `.json` file with the same content for scripts.
@@ -38,8 +38,8 @@ The report comes as an `.html` file to read and a `.json` file with the same con
 ## Privacy
 
 - **Nothing is uploaded.** Feverfew has no telemetry. A scan's only network traffic is the connection tests: pings to the router and to `1.1.1.1` (about 20 each, to measure latency), and a name lookup for `www.microsoft.com`. Use `--no-network` to skip it. **Check for updates** contacts GitHub only when you press it, and sends no report data.
-- **Identifiers are hidden by default.** Serial numbers, the system UUID, computer and user names, drive labels, MAC addresses, public IP addresses, and email addresses in log messages become `[hidden]`. Tick the checkbox to keep them, for example for a warranty claim.
-- **Feverfew never reads** product keys, BitLocker recovery keys, passwords, browser data or personal files.
+- **Identifiers are hidden by default.** Serial numbers, the system UUID, computer and user names, Windows account IDs, drive labels, MAC addresses, public IP addresses, and email addresses in log messages become `[hidden]`. Tick the checkbox to keep them, for example for a warranty claim.
+- **Feverfew never reads** product keys, BitLocker recovery keys, passwords, browser data or personal files. It checks only whether a BitLocker drive has a recovery password, never the password itself.
 - **Reports still say a lot about a PC.** The installed programs list, for one, is included even with identifiers hidden. Only send a report to someone you trust, and glance through it first if that matters to you.
 
 ## Repair tools
@@ -81,7 +81,7 @@ Feverfew.exe --cli [--out <folder>] [--include-identifiers] [--no-network]
 Feverfew.exe --check-update
 ```
 
-Run it from an elevated prompt for a full scan. Without administrator rights it still runs, but can't read the TPM, BitLocker, SMART prediction or crash dumps, and the report says so.
+Run it from an elevated prompt for a full scan. Without administrator rights it still runs, but can't read the TPM, BitLocker, SMART prediction, restore points or crash dumps, and the report says so.
 
 ## Building
 

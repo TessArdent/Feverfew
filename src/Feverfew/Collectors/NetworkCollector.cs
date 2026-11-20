@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -24,14 +25,14 @@ namespace Feverfew.Collectors
                     var v4 = ip.UnicastAddresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork).Select(a => a.Address).ToList();
                     var gw = ip.GatewayAddresses.Select(g => g.Address).Where(a => a.AddressFamily == AddressFamily.InterNetwork && !a.Equals(IPAddress.Any)).ToList();
                     var dns = ip.DnsAddresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToList();
-                    foreach (var a in ip.UnicastAddresses.Select(u => u.Address).Concat(gw).Concat(dns).Where(IsPublic)) r.Private(a.ToString());
+                    foreach (var a in ip.UnicastAddresses.Select(u => u.Address).Concat(gw).Concat(dns.Where(d => !KnownResolvers.Contains(d.ToString()))).Where(IsPublic)) r.Private(a.ToString());
                     bool dhcp = false;
                     try { dhcp = ip.GetIPv4Properties().IsDhcpEnabled; } catch (NetworkInformationException) { }
                     var mac = string.Join("-", n.GetPhysicalAddress().GetAddressBytes().Select(b => b.ToString("X2")));
 
                     t.Rows.Add(new[]
                     {
-                        n.Description, n.NetworkInterfaceType.ToString(), n.Speed > 0 ? Fmt.Num(n.Speed / 1000000.0, "0") + " Mbps" : "-",
+                        n.Description, TypeName(n.NetworkInterfaceType),n.Speed > 0 ? Fmt.Num(n.Speed / 1000000.0, "0") + " Mbps" : "-",
                         string.Join(", ", v4), string.Join(", ", gw), string.Join(", ", dns), dhcp ? "Yes" : "No", r.Private(mac)
                     });
 
@@ -90,6 +91,28 @@ namespace Feverfew.Collectors
                 if (entries.Count > 20)
                     r.Find(Severity.Info, "Large hosts file", entries.Count + " custom entries.", "This might be an ad blocker, but malware also uses this file to redirect sites.");
             });
+        }
+
+        // Public DNS services everyone uses. They identify nobody and help whoever reads the report.
+        private static readonly HashSet<string> KnownResolvers = new HashSet<string>
+        {
+            "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112",
+            "208.67.222.222", "208.67.220.220", "94.140.14.14", "94.140.15.15", "76.76.2.0", "76.76.10.0", "194.242.2.2"
+        };
+
+        // .NET has no name for some interface types, such as 53 (propVirtual), which VPNs like WireGuard use.
+        public static string TypeName(NetworkInterfaceType type)
+        {
+            switch ((int)type)
+            {
+                case 6: return "Ethernet";
+                case 71: return "Wi-Fi";
+                case 131: return "Tunnel";
+                case 53: return "Virtual (VPN or tunnel)";
+                case 243: case 244: return "Mobile broadband";
+                case 23: return "Dial-up (PPP)";
+                default: return Enum.IsDefined(typeof(NetworkInterfaceType), type) ? type.ToString() : "Type " + (int)type;
+            }
         }
 
         private static bool IsPublic(IPAddress a)

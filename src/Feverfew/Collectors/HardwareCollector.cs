@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Microsoft.Win32;
@@ -13,16 +15,22 @@ namespace Feverfew.Collectors
             Guard.Try(s, "CPU", () =>
             {
                 var cpus = Wmi.Cim("SELECT * FROM Win32_Processor");
+                bool hypervisor = false;
+                Guard.Try(s, "Hypervisor", () => { hypervisor = Wmi.Cim("SELECT HypervisorPresent FROM Win32_ComputerSystem").FirstOrDefault()?.Bool("HypervisorPresent") == true; });
+                var live = SampleCpu();
                 foreach (var c in cpus)
                 {
                     s.Add("Model", c.Str("Name"));
                     s.Add("Socket", c.Str("SocketDesignation"));
                     s.Add("Cores / threads", c.Str("NumberOfCores") + " / " + c.Str("NumberOfLogicalProcessors"));
                     s.Add("Base speed", c.Str("MaxClockSpeed") + " MHz");
-                    s.Add("Speed during scan", c.Str("CurrentClockSpeed") + " MHz");
+                    // Win32_Processor's CurrentClockSpeed and LoadPercentage are the base speed and often empty, so use the performance counters.
+                    if (live != null && c.Long("MaxClockSpeed") > 0)
+                        s.Add("Speed during scan", Fmt.Num(c.Long("MaxClockSpeed").Value * live.Item1 / 100.0, "0") + " MHz");
                     s.Add("L2 / L3 cache", Fmt.Bytes(c.Long("L2CacheSize") * 1024) + " / " + Fmt.Bytes(c.Long("L3CacheSize") * 1024));
-                    s.Add("Load during scan", c.Str("LoadPercentage") + "%");
-                    s.Add("Virtualization on in firmware", Fmt.YesNo(c.Bool("VirtualizationFirmwareEnabled")));
+                    if (live != null) s.Add("Load during scan", Fmt.Num(Math.Min(100, live.Item2), "0") + "%");
+                    // With Windows' hypervisor running, Windows reports firmware virtualization as off even though it's in use.
+                    s.Add("Virtualization on in firmware", hypervisor ? "Yes (in use by Windows' hypervisor)" : Fmt.YesNo(c.Bool("VirtualizationFirmwareEnabled")));
                 }
                 var first = cpus.First();
                 r.AddSummary("CPU", first.Str("Name"));
@@ -45,6 +53,27 @@ namespace Feverfew.Collectors
                 if (t.Rows.Count == 0) s.Tables.Remove(t);
                 s.Note("Windows only exposes motherboard thermal zones, so these aren't per-core CPU temperatures.");
             });
+        }
+
+        /// <summary>Performance as a percentage of base speed, and utility (Task Manager's CPU figure), averaged over about a second. Null if unavailable.</summary>
+        private static Tuple<double, double> SampleCpu()
+        {
+            try
+            {
+                const string q = "SELECT PercentProcessorPerformance, PercentProcessorUtility FROM Win32_PerfFormattedData_Counters_ProcessorInformation WHERE Name='_Total'";
+                Wmi.Cim(q); // the first read only primes the counters
+                double perf = 0, util = 0;
+                for (int i = 0; i < 2; i++)
+                {
+                    System.Threading.Thread.Sleep(500);
+                    var row = Wmi.Cim(q).FirstOrDefault();
+                    if (row == null || row.Long("PercentProcessorPerformance") == null) return null;
+                    perf += row.Long("PercentProcessorPerformance").Value / 2.0;
+                    util += (row.Long("PercentProcessorUtility") ?? 0) / 2.0;
+                }
+                return perf > 0 ? Tuple.Create(perf, util) : null;
+            }
+            catch (Exception) { return null; }
         }
 
         public static void Memory(Report r)
@@ -71,17 +100,22 @@ namespace Feverfew.Collectors
                 var speed = sticks.Select(m => m.Long("ConfiguredClockSpeed")).FirstOrDefault(v => v > 0);
                 r.AddSummary("Memory", Fmt.Bytes(total) + " in " + sticks.Count + " module" + (sticks.Count == 1 ? "" : "s") + (speed != null ? " at " + speed + " MT/s" : ""));
 
-                Guard.Try(s, "Memory slots", () =>
-                {
-                    var a = Wmi.Cim("SELECT MemoryDevices, MaxCapacityEx FROM Win32_PhysicalMemoryArray").FirstOrDefault();
-                    if (a != null) s.Add("Slots used", sticks.Count + " of " + a.Str("MemoryDevices"));
-                });
+                // LPDDR (SMBIOS types 27-30 and 35) and "row of chips" modules are soldered to the board, so there are no slots to fill.
+                bool soldered = sticks.Count > 0 && sticks.All(m => new long?[] { 27, 28, 29, 30, 35 }.Contains(m.Long("SMBIOSMemoryType")) || m.Long("FormFactor") == 11);
+                if (soldered)
+                    s.Add("Slots used", "None: soldered to the board, so it can't be upgraded");
+                else
+                    Guard.Try(s, "Memory slots", () =>
+                    {
+                        var a = Wmi.Cim("SELECT MemoryDevices, MaxCapacityEx FROM Win32_PhysicalMemoryArray").FirstOrDefault();
+                        if (a != null) s.Add("Slots used", sticks.Count + " of " + a.Str("MemoryDevices"));
+                    });
 
                 if (sticks.Select(m => m.Long("Capacity")).Distinct().Count() > 1 || sticks.Select(m => m.Str("PartNumber")).Distinct().Count() > 1)
                     r.Find(Severity.Info, "Mixed memory modules", "The installed RAM sticks aren't an identical set.",
                         "Mixed kits usually work, but they're a common cause of random crashes when memory runs at higher speeds.");
 
-                var slow = sticks.Where(m => RatedSpeed(m) > 0 && m.Long("ConfiguredClockSpeed") > 0 && m.Long("ConfiguredClockSpeed") < RatedSpeed(m) * 0.9).ToList();
+                var slow = sticks.Where(m => RatedSpeed(m) > 0 && m.Long("ConfiguredClockSpeed") > 0 && m.Long("ConfiguredClockSpeed") < RatedSpeed(m) * 0.97).ToList(); // DDR5-5200 at its 4800 fallback is only 8% slow
                 if (slow.Count > 0)
                     r.Find(Severity.Info, "Memory is running below its rated speed",
                         "Rated " + RatedSpeed(slow[0]) + " MT/s, running at " + slow[0].Str("ConfiguredClockSpeed") + " MT/s.",
@@ -120,24 +154,43 @@ namespace Feverfew.Collectors
                 var t = s.Table("Graphics adapters", "Name", "Memory", "Driver version", "Driver date", "Current mode", "Status");
                 foreach (var g in gpus)
                 {
-                    var date = g.Date("DriverDate");
+                    var date = DriverDate(g.Str("PNPDeviceID")) ?? g.Date("DriverDate");
                     var mode = g.Long("CurrentHorizontalResolution") > 0
                         ? g.Str("CurrentHorizontalResolution") + " x " + g.Str("CurrentVerticalResolution") + " at " + g.Str("CurrentRefreshRate") + " Hz" : "Inactive";
-                    t.Rows.Add(new[] { g.Str("Name"), Fmt.Bytes(VideoMemory(g.Str("Name")) ?? g.Long("AdapterRAM")), g.Str("DriverVersion"), Fmt.Date(date), mode, g.Str("Status") });
+                    bool isVirtual = IsVirtualDisplay(g.Str("Name"));
+                    t.Rows.Add(new[] { g.Str("Name") + (isVirtual ? " (virtual)" : ""), Fmt.Bytes(VideoMemory(g.Str("Name")) ?? g.Long("AdapterRAM")), g.Str("DriverVersion"), DateText(date), mode, g.Str("Status") });
 
+                    if (isVirtual) continue;
                     if (g.Str("Name").IndexOf("Basic Display", StringComparison.OrdinalIgnoreCase) >= 0)
                         r.Find(Severity.Warning, "No proper graphics driver", "Windows is using the Microsoft Basic Display Adapter.", "Install the driver from NVIDIA, AMD, Intel, or the PC maker.");
-                    else if (date != null && (DateTime.Now - date.Value).TotalDays > 365 * 2)
+                    else if (date != null && !IsPlaceholder(date.Value) && (DateTime.Now - date.Value).TotalDays > 365 * 2)
                         r.Find(Severity.Info, "Old graphics driver", g.Str("Name") + " has a driver dated " + Fmt.Date(date) + ".", "Update it from the graphics card maker's site if games or video misbehave.");
                 }
-                r.AddSummary("Graphics", string.Join(", ", gpus.Select(g => g.Str("Name"))));
+                var real = gpus.Where(g => !IsVirtualDisplay(g.Str("Name"))).ToList();
+                r.AddSummary("Graphics", string.Join(", ", (real.Count > 0 ? real : gpus).Select(g => g.Str("Name"))));
             });
 
             Guard.Try(s, "Monitors", () =>
             {
-                var t = s.Table("Connected monitors", "Maker code", "Model");
-                foreach (var m in Wmi.Query(@"root\wmi", "SELECT ManufacturerName, UserFriendlyName FROM WmiMonitorID"))
-                    t.Rows.Add(new[] { Decode(m.Raw("ManufacturerName")), Decode(m.Raw("UserFriendlyName")) });
+                var displays = DisplayInfo.Active();
+                if (displays.Count == 0)
+                {
+                    var old = s.Table("Connected monitors", "Maker code", "Model");
+                    foreach (var m in Wmi.Query(@"root\wmi", "SELECT ManufacturerName, UserFriendlyName FROM WmiMonitorID"))
+                        old.Rows.Add(new[] { Decode(m.Raw("ManufacturerName")), Decode(m.Raw("UserFriendlyName")) });
+                    return;
+                }
+                var t = s.Table("Connected monitors", "Monitor", "Connected to", "Resolution", "Refresh rate", "Highest at this resolution", "Main display");
+                foreach (var d in displays)
+                    t.Rows.Add(new[] { d.Name, d.Adapter, d.Width + " x " + d.Height, d.Hz + " Hz", d.MaxHzAtResolution + " Hz", Fmt.YesNo(d.Primary) });
+
+                // A desktop with a graphics card whose monitor is plugged into the motherboard runs games on the processor's graphics.
+                bool hasCard = Wmi.Cim("SELECT Name FROM Win32_VideoController").Any(g => DisplayInfo.IsDiscrete(g.Str("Name")));
+                var onBoard = displays.Where(d => !d.Internal && DisplayInfo.IsIntegrated(d.Adapter)).ToList();
+                if (hasCard && onBoard.Count > 0 && !Machine.IsLaptop())
+                    r.Find(Severity.Warning, "A monitor is plugged into the motherboard",
+                        string.Join(", ", onBoard.Select(d => d.Name)) + " is connected to " + onBoard[0].Adapter + ", the processor's graphics, even though this PC has a graphics card.",
+                        "Plug it into one of the graphics card's outputs (the lower ports on the back of the PC). Games shown on it run slower, and the graphics card may sit idle.");
             });
 
             Guard.Try(s, "Sound devices", () =>
@@ -146,6 +199,18 @@ namespace Feverfew.Collectors
                 foreach (var d in Wmi.Cim("SELECT Name, Status FROM Win32_SoundDevice"))
                     t.Rows.Add(new[] { d.Str("Name"), d.Str("Status") });
             });
+        }
+
+        // Display adapters that remote desktop, streaming and VM software add. They have no hardware, so driver age and refresh rate don't matter.
+        private static readonly string[] VirtualDisplayNames =
+        {
+            "Parsec Virtual", "Remote Display", "Remote Desktop", "Virtual Display", "IddCx", "Indirect Display", "spacedesk", "Citrix",
+            "VMware SVGA", "VirtualBox", "Hyper-V Video", "Hyper-V Display", "Meta Virtual Monitor", "Virtual Desktop Monitor", "GameViewer", "Sunshine", "Splashtop", "AnyDesk", "TeamViewer"
+        };
+
+        public static bool IsVirtualDisplay(string name)
+        {
+            return VirtualDisplayNames.Any(v => (name ?? "").IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         // Win32_VideoController.AdapterRAM stops at 4 GB; the driver's registry entry has the true size.
@@ -210,16 +275,96 @@ namespace Feverfew.Collectors
             Guard.Try(s, "Drivers", () =>
             {
                 var t = s.Table("Non-Microsoft drivers", "Device", "Provider", "Version", "Date", "Signed");
-                var rows = Wmi.Cim("SELECT DeviceName, DriverProviderName, DriverVersion, DriverDate, IsSigned FROM Win32_PnPSignedDriver")
+                var rows = Wmi.Cim("SELECT DeviceName, DeviceID, DriverProviderName, DriverVersion, DriverDate, IsSigned FROM Win32_PnPSignedDriver")
                     .Where(d => d.Str("DriverProviderName").Length > 0 && d.Str("DriverProviderName").IndexOf("Microsoft", StringComparison.OrdinalIgnoreCase) < 0)
                     .OrderBy(d => d.Str("DriverProviderName")).ThenBy(d => d.Str("DeviceName"))
                     .ToList();
                 foreach (var d in rows)
-                    t.Rows.Add(new[] { d.Str("DeviceName"), d.Str("DriverProviderName"), d.Str("DriverVersion"), Fmt.Date(d.Date("DriverDate")), Fmt.YesNo(d.Bool("IsSigned")) });
+                    t.Rows.Add(new[] { d.Str("DeviceName"), d.Str("DriverProviderName"), d.Str("DriverVersion"), DateText(DriverDate(d.Str("DeviceID"))), Fmt.YesNo(d.Bool("IsSigned")) });
                 var unsigned = rows.Where(d => d.Bool("IsSigned") == false).ToList();
                 if (unsigned.Count > 0)
                     r.Find(Severity.Warning, "Unsigned drivers installed", string.Join(", ", unsigned.Take(5).Select(d => d.Str("DeviceName"))), "Replace them with signed drivers from the device maker.");
             });
+
+            Guard.Try(s, "Other kernel drivers", () => KernelDrivers(s));
+        }
+
+        // Drivers that belong to no device, such as anti-cheat, antivirus, VPN and backup software. They run in the kernel,
+        // so they're common causes of blue screens, but the device driver list above doesn't show them.
+        private static void KernelDrivers(Section s)
+        {
+            var deviceServices = new HashSet<string>(Wmi.Cim("SELECT Service FROM Win32_PnPEntity").Select(d => d.Str("Service")).Where(v => v.Length > 0), StringComparer.OrdinalIgnoreCase);
+            var t = s.Table("Other third-party kernel drivers", "Driver", "Name", "Company", "Version", "Kind", "Starts", "Running");
+            var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            foreach (var d in Wmi.Cim("SELECT Name, DisplayName, PathName, StartMode, State FROM Win32_SystemDriver").OrderBy(d => d.Str("Name")))
+            {
+                var name = d.Str("Name");
+                if (deviceServices.Contains(name)) continue;
+                bool running = d.Str("State") == "Running";
+                var start = d.Str("StartMode");
+                // Windows ships dozens of storage and network drivers from other makers that never load; only list what's loaded or set to load.
+                if (!running && start != "Boot" && start != "System" && start != "Auto") continue;
+                if (d.Str("DisplayName").StartsWith("Microsoft ", StringComparison.OrdinalIgnoreCase)) continue;
+                var path = DriverPath(d.Str("PathName"), windows);
+                if (path == null || !System.IO.File.Exists(path)) continue;
+                var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(path);
+                var company = (info.CompanyName ?? "").Trim();
+                if (company.IndexOf("Microsoft", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
+                var kind = "Kernel driver";
+                var altitude = Reg.Machine(@"SYSTEM\CurrentControlSet\Services\" + name + @"\Instances\" + (Reg.Machine(@"SYSTEM\CurrentControlSet\Services\" + name + @"\Instances", "DefaultInstance") as string ?? ""), "Altitude") as string;
+                if (altitude != null) kind = "File system filter (altitude " + altitude + ")";
+                t.Rows.Add(new[] { System.IO.Path.GetFileName(path), d.Str("DisplayName"), company.Length > 0 ? company : "Unknown", (info.FileVersion ?? "").Trim(), kind, d.Str("StartMode"), Fmt.YesNo(running) });
+            }
+            s.Note("Other third-party kernel drivers lists drivers that belong to no device, such as anti-cheat, antivirus, VPN and backup software. They're a common cause of blue screens, so compare them with a crash dump's faulting driver.");
+        }
+
+        private static string DriverPath(string raw, string windows)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var p = raw.Trim().Trim('"');
+            if (p.StartsWith(@"\??\", StringComparison.Ordinal)) p = p.Substring(4);
+            if (p.StartsWith(@"\SystemRoot\", StringComparison.OrdinalIgnoreCase)) p = System.IO.Path.Combine(windows, p.Substring(12));
+            else if (p.StartsWith(@"System32\", StringComparison.OrdinalIgnoreCase) || p.StartsWith(@"SysWOW64\", StringComparison.OrdinalIgnoreCase)) p = System.IO.Path.Combine(windows, p);
+            return System.IO.Path.IsPathRooted(p) ? p : null;
+        }
+
+        // Win32_PnPSignedDriver swaps the day and month of driver dates (DriverVer=09/03/2026 comes back as 9 March),
+        // so both driver tables read the date Windows stored with the device's driver instead.
+        private static DateTime? DriverDate(string deviceId)
+        {
+            if (string.IsNullOrEmpty(deviceId)) return null;
+            try
+            {
+                using (var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+                using (var dev = root.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\" + deviceId))
+                {
+                    var driver = dev?.GetValue("Driver") as string;
+                    if (string.IsNullOrEmpty(driver)) return null;
+                    using (var k = root.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\" + driver))
+                    {
+                        if (k == null) return null;
+                        var data = k.GetValue("DriverDateData") as byte[];
+                        if (data != null && data.Length >= 8) return DateTime.FromFileTimeUtc(BitConverter.ToInt64(data, 0)).Date;
+                        DateTime parsed;
+                        if (DateTime.TryParseExact(k.GetValue("DriverDate") as string, "M-d-yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
+                            return parsed;
+                    }
+                }
+            }
+            catch (Exception) { /* no date rather than a wrong one */ }
+            return null;
+        }
+
+        // Intel chipset INFs use 1968-07-18 so any other driver outranks them, and drivers built into Windows carry 2006-06-21.
+        private static bool IsPlaceholder(DateTime d)
+        {
+            return d.Date == new DateTime(1968, 7, 18) || d.Date == new DateTime(2006, 6, 21);
+        }
+
+        private static string DateText(DateTime? d)
+        {
+            return d != null && IsPlaceholder(d.Value) ? "Placeholder (" + Fmt.Date(d) + ")" : Fmt.Date(d);
         }
 
         // Keeps bus\vendor&product and drops the instance part, which can contain a device serial.
@@ -274,6 +419,9 @@ namespace Feverfew.Collectors
                 s.Add("Capacity remaining", Fmt.Num(health, "0") + "% of original");
                 if (health < 60)
                     r.Find(Severity.Warning, "Battery is badly worn", "It now holds " + Fmt.Num(health, "0") + "% of its original charge.", "Consider replacing it, and check it isn't swollen.");
+                else if (health < 80)
+                    r.Find(Severity.Info, "Battery is wearing", "It now holds " + Fmt.Num(health, "0") + "% of its original charge, so it runs out sooner than when new.",
+                        "Normal for an older battery. If the maker's app offers a charge limit (often 80%), turning it on slows further wear.");
             });
             Guard.Try(s, "Battery cycles", () =>
             {

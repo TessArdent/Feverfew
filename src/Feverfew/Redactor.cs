@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 
 namespace Feverfew
 {
-    /// <summary>Hides names, serial numbers, MAC addresses and public IPs everywhere in a finished report.</summary>
+    /// <summary>Hides names, serial numbers, MAC addresses and public IPs and account SIDs everywhere in a finished report.</summary>
     public static class Redactor
     {
         public const string Hidden = "[hidden]";
@@ -20,6 +20,8 @@ namespace Feverfew
         };
 
         private static readonly Regex UserPath = new Regex(@"([A-Za-z]:\\Users\\)[^\\""'<>|:*?\r\n]+", RegexOptions.Compiled);
+        // Account SIDs (S-1-5-21-domain-rid) are unique to one PC and user. Well-known SIDs such as S-1-5-18 stay visible.
+        private static readonly Regex AccountSid = new Regex(@"S-1-5-21(-\d+){3,4}", RegexOptions.Compiled);
         private static readonly Regex Email = new Regex(@"[\w.+-]+@[\w-]+(\.[\w-]+)+", RegexOptions.Compiled);
 
         public static void Apply(Report report)
@@ -36,6 +38,7 @@ namespace Feverfew
                 if (exact.Contains(text.Trim())) return Hidden;
                 text = UserPath.Replace(text, "$1" + Hidden);
                 text = Email.Replace(text, Hidden);
+                text = AccountSid.Replace(text, Hidden);
                 return pattern == null ? text : pattern.Replace(text, Hidden);
             };
 

@@ -21,6 +21,115 @@ namespace Feverfew.Collectors
             public string Provider; public int Id; public int Count; public DateTime? Last; public byte Level; public string Message;
         }
 
+        // Details gathered while reading the System log, so findings can name the disk, the boot and the driver.
+        private sealed class Evidence
+        {
+            public readonly Dictionary<int, int> DiskErrors = new Dictionary<int, int>(); // disk number, or -1 when only the controller is named
+            public readonly List<DateTime> Throttles = new List<DateTime>();
+            public readonly List<uint> StopCodes = new List<uint>();
+            public readonly List<string> SuspectDrivers = new List<string>();
+            public readonly List<string> DumpDrivers = new List<string>(); // from crash dumps in the last Days days
+            public readonly List<DateTime> Restarts = new List<DateTime>(); // Kernel-Power 41, newest first
+            public readonly Dictionary<string, Whea> Whea = new Dictionary<string, Whea>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private sealed class Whea
+        {
+            public int Count; public DateTime? Last; public bool Fatal; public string Component, Source, Type, Device;
+        }
+
+        private static string Field(string text, string pattern)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(text, pattern + @":[ \t]*([^\r\n]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups[1].Value.Trim() : "";
+        }
+
+        private static void TrackWhea(EventRecord e, Evidence ev)
+        {
+            string text = "";
+            try { text = e.FormatDescription() ?? ""; } catch (Exception) { }
+            var component = Field(text, @"(?:Reported by component|Component)");
+            var source = Field(text, "Error Source");
+            var type = Field(text, "Error Type");
+            // PCIe errors name the device by hardware ID or by vendor and device numbers.
+            var device = "";
+            var id = System.Text.RegularExpressions.Regex.Match(text, @"VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!id.Success) id = System.Text.RegularExpressions.Regex.Match(text, @"Vendor ID:Device ID:\s*0x([0-9A-F]{1,4}):0x([0-9A-F]{1,4})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (id.Success) device = "VEN_" + id.Groups[1].Value.PadLeft(4, '0').ToUpperInvariant() + "&DEV_" + id.Groups[2].Value.PadLeft(4, '0').ToUpperInvariant();
+            bool fatal = (e.Level ?? 3) <= 2;
+            var key = e.Id + "|" + fatal + "|" + component + "|" + source + "|" + type + "|" + device;
+            Whea w;
+            if (!ev.Whea.TryGetValue(key, out w))
+                ev.Whea[key] = w = new Whea { Last = e.TimeCreated, Fatal = fatal, Component = component, Source = source, Type = type, Device = device };
+            w.Count++;
+        }
+
+        private static void WheaTable(Report r, Section s, Evidence ev, int corrected)
+        {
+            if (ev.Whea.Count == 0) return;
+            var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dev in ev.Whea.Values.Select(w => w.Device).Where(d => d.Length > 0).Distinct())
+                try
+                {
+                    var match = Wmi.Cim("SELECT Name FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%" + dev + "%'").FirstOrDefault();
+                    names[dev] = match != null && match.Str("Name").Length > 0 ? match.Str("Name") + " (" + dev + ")" : dev;
+                }
+                catch (Exception) { names[dev] = dev; }
+
+            var t = s.Table("Hardware errors (WHEA)", "Count", "Last seen", "Kind", "Component", "Error source", "Error type", "Device");
+            foreach (var w in ev.Whea.Values.OrderByDescending(w => w.Fatal).ThenByDescending(w => w.Count))
+                t.Rows.Add(new[] { w.Count.ToString(), Fmt.Time(w.Last), w.Fatal ? "Fatal" : "Corrected", w.Component, w.Source, w.Type, w.Device.Length > 0 ? names[w.Device] : "" });
+
+            var top = ev.Whea.Values.Where(w => !w.Fatal).OrderByDescending(w => w.Count).FirstOrDefault();
+            if (corrected >= 10 && top != null)
+            {
+                string where = (top.Component + " " + top.Source).ToLowerInvariant();
+                string advice = where.Contains("pci")
+                    ? "Reseat " + (top.Device.Length > 0 ? names[top.Device] : "the graphics card and NVMe drive") + ". If errors continue, set that slot's PCIe generation one step lower in BIOS setup, and update the BIOS."
+                    : where.Contains("memory")
+                        ? "Turn off the memory profile (XMP or EXPO) to test, then check the memory with MemTest86."
+                        : where.Contains("processor") || where.Contains("machine check")
+                            ? "Remove any CPU overclock or undervolt, load the BIOS defaults, and update the BIOS."
+                            : "Reseat the graphics card and NVMe drive, then update the BIOS.";
+                r.Find(Severity.Warning, "Repeated corrected hardware errors", corrected + " corrected WHEA events, most from " + (top.Component.Length > 0 ? top.Component : "an unnamed component") + ". See 'Hardware errors (WHEA)'.", advice);
+            }
+        }
+
+        private static readonly int[] DiskErrorIds = { 11, 51, 52, 153, 154 };
+        private static readonly int[] ControllerErrorIds = { 11, 129 };
+
+        private static bool Is(EventRecord e, string provider) { return string.Equals(e.ProviderName, provider, StringComparison.OrdinalIgnoreCase); }
+
+        private static void Track(EventRecord e, Evidence ev)
+        {
+            if ((Is(e, "disk") && DiskErrorIds.Contains(e.Id)) || ((Is(e, "stornvme") || Is(e, "storahci")) && ControllerErrorIds.Contains(e.Id)))
+            {
+                int disk = -1;
+                var values = string.Join(" ", e.Properties.Select(p => p.Value as string).Where(v => v != null));
+                var m = System.Text.RegularExpressions.Regex.Match(values, @"Harddisk(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (!m.Success && Is(e, "disk")) m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"\bDisk (\d+)\b");
+                if (m.Success) disk = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                int c; ev.DiskErrors.TryGetValue(disk, out c); ev.DiskErrors[disk] = c + 1;
+            }
+            else if (Is(e, "Microsoft-Windows-WHEA-Logger"))
+                TrackWhea(e, ev);
+            else if (Is(e, "Microsoft-Windows-Kernel-Power") && e.Id == 41 && e.TimeCreated != null)
+                ev.Restarts.Add(e.TimeCreated.Value);
+            else if (Is(e, "Microsoft-Windows-Kernel-Processor-Power") && e.Id == 37 && e.TimeCreated != null)
+                ev.Throttles.Add(e.TimeCreated.Value);
+            else if (Is(e, "Microsoft-Windows-WER-SystemErrorReporting") && e.Id == 1001 || Is(e, "BugCheck") && e.Id == 1001)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"0x([0-9a-fA-F]{8})");
+                uint code;
+                if (m.Success && uint.TryParse(m.Groups[1].Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out code)) ev.StopCodes.Add(code);
+            }
+            else if (Is(e, "Microsoft-Windows-WER-SystemErrorReporting") && e.Id == 1019)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"driver:\s*([\w.-]+\.sys)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (m.Success && !ev.SuspectDrivers.Contains(m.Groups[1].Value, StringComparer.OrdinalIgnoreCase)) ev.SuspectDrivers.Add(m.Groups[1].Value);
+            }
+        }
+
         private static string Query(string levels)
         {
             long ms = Days * 86400000L;
@@ -30,7 +139,22 @@ namespace Feverfew.Collectors
         private static string Describe(EventRecord e)
         {
             // Windows puts invisible direction marks around the dates in some messages.
-            try { return Fmt.Clip((e.FormatDescription() ?? "").Replace("\u200e", "").Replace("\u200f", ""), 260); }
+            string text = "";
+            try { text = (e.FormatDescription() ?? "").Replace("\u200e", "").Replace("\u200f", "").Trim(); }
+            catch (Exception) { }
+            if (text.Length == 0) text = RawData(e);
+            return Fmt.Clip(text, 260);
+        }
+
+        // Some drivers (nvlddmkm, for one) ship no message text, so show the values the event carries instead.
+        private static string RawData(EventRecord e)
+        {
+            try
+            {
+                var parts = e.Properties.Select(p => Convert.ToString(p.Value, CultureInfo.InvariantCulture)?.Trim())
+                    .Where(v => !string.IsNullOrEmpty(v) && v.Length < 400).ToList();
+                return parts.Count == 0 ? "" : "(no message text) " + string.Join(" \u00b7 ", parts);
+            }
             catch (Exception) { return ""; }
         }
 
@@ -63,11 +187,16 @@ namespace Feverfew.Collectors
         public static void Collect(Report r)
         {
             var s = r.NewSection("Crashes and event logs (last " + Days + " days)");
+            var dumps = new List<DumpFile>();
+            try { dumps = ReadDumps(); } catch (Exception) { /* the Crash dumps step reports the problem */ }
 
             Guard.Try(s, "System log", () =>
             {
                 var shutdowns = new List<string[]>();
-                var sys = Scan("System", e => RecordShutdown(e, shutdowns));
+                var evidence = new Evidence();
+                foreach (var d in dumps.Where(d => d.Driver != null && d.File.LastWriteTime >= DateTime.Now.AddDays(-Days)))
+                    if (!evidence.DumpDrivers.Contains(d.Driver, StringComparer.OrdinalIgnoreCase)) evidence.DumpDrivers.Add(d.Driver);
+                var sys = Scan("System", e => { RecordShutdown(e, shutdowns); Track(e, evidence); });
                 Fill(s.Table("Most frequent System errors", "Count", "Last seen", "Source", "ID", "Message"), sys);
                 if (shutdowns.Count > 0)
                 {
@@ -75,7 +204,8 @@ namespace Feverfew.Collectors
                     t.Rows.AddRange(shutdowns);
                     s.Note("Windows logs these when the PC starts again, so the crash itself came earlier. An 'improper shutdown' message gives Windows' last recorded time before the stop.");
                 }
-                Analyze(r, s, sys);
+                Analyze(r, s, sys, evidence);
+                Guard.Try(s, "Crash timelines", () => Timelines(s, evidence.Restarts));
             });
 
             Guard.Try(s, "Application log", () =>
@@ -99,7 +229,76 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Warning, "A program keeps crashing: " + worst.Key, worst.Value + " crashes in the last " + Days + " days.", "Update or reinstall it. The 'Program crashes' table names the faulting module.");
             });
 
-            Guard.Try(s, "Crash dumps", () => Dumps(r, s));
+            Guard.Try(s, "Crash dumps", () => Dumps(r, s, dumps));
+        }
+
+        private const int MaxTimelines = 5;
+        private const int MaxTimelineRows = 40;
+
+        // For each unexpected restart, the warnings and errors from the last minutes before the PC stopped and from the restart itself,
+        // so related events in different logs read as one story.
+        private static void Timelines(Section s, List<DateTime> restarts)
+        {
+            var boots = Read("System", "*[System[Provider[@Name='Microsoft-Windows-Kernel-General'] and EventID=12 and TimeCreated[timediff(@SystemTime) <= " + Days * 86400000L + "]]]", 500)
+                .Select(e => e.Time).OrderBy(t => t).ToList();
+            foreach (var restart in restarts.Take(MaxTimelines))
+            {
+                var boot = boots.LastOrDefault(b => b <= restart.AddMinutes(1));
+                if (boot == default(DateTime)) boot = restart.AddMinutes(-2);
+                // The last thing the crashed session logged, at any level, marks roughly when it stopped.
+                var last = Read("System", "*[System[TimeCreated[@SystemTime<'" + Utc(boot.AddSeconds(-1)) + "' and @SystemTime>='" + Utc(boot.AddDays(-2)) + "']]]", 1, true).FirstOrDefault();
+                var stopped = last != null ? last.Time : boot.AddMinutes(-1);
+                // Windows logs the blue screen and improper shutdown events within about 30 seconds of Kernel-Power 41.
+                var end = (restart > boot ? restart : boot).AddSeconds(45);
+                string window = "*[System[(Level=1 or Level=2 or Level=3) and TimeCreated[@SystemTime>='" + Utc(stopped.AddMinutes(-15)) + "' and @SystemTime<='" + Utc(end) + "']]]";
+                var all = Read("System", window, 200, true).Concat(Read("Application", window, 200, true))
+                    .Where(e => !UsuallyHarmless(e.Source, e.Id)).ToList();
+                // Keep the events nearest the stop, and the first ones after the restart.
+                var before = all.Where(e => e.Time < boot).OrderByDescending(e => e.Time).Take(MaxTimelineRows - 12);
+                var after = all.Where(e => e.Time >= boot).OrderBy(e => e.Time).Take(12);
+                var events = before.Concat(after).OrderBy(e => e.Time).ToList();
+                if (events.Count == 0) continue;
+                var t = s.Table("Events around the restart at " + Fmt.Seconds(restart), "Time", "Log", "Level", "Source", "ID", "Message");
+                foreach (var e in events)
+                    t.Rows.Add(new[] { Fmt.Seconds(e.Time) + (e.Time >= boot ? " (after restart)" : ""), e.Log, e.Level, e.Source, e.Id, e.Message });
+            }
+            if (s.Tables.Any(t => t.Title.StartsWith("Events around the restart", StringComparison.Ordinal)))
+                s.Note("Each timeline runs from 15 minutes before the last event Windows logged before it stopped, through the first minutes after the restart.");
+        }
+
+        private sealed class Line { public DateTime Time; public string Log, Level, Source, Id, Message; }
+
+        // Events Windows logs on healthy PCs all the time. They're kept out of timelines and marked in the error lists.
+        private static readonly HashSet<string> Harmless = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Microsoft-Windows-DistributedCOM|10010", "Microsoft-Windows-DistributedCOM|10016",
+            "Microsoft-Windows-Windows Firewall With Advanced Security|2042", "Microsoft-Windows-DNS-Client|8048",
+            "Microsoft-Windows-WMI|63", "Microsoft-Windows-Kernel-PnP|219"
+        };
+
+        private static bool UsuallyHarmless(string source, string id) { return Harmless.Contains(source + "|" + id); }
+
+        private static string Utc(DateTime local) { return local.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture); }
+
+        private static List<Line> Read(string log, string xpath, int max, bool newestFirst = false)
+        {
+            var list = new List<Line>();
+            var q = new EventLogQuery(log, PathType.LogName, xpath) { ReverseDirection = newestFirst };
+            using (var reader = new EventLogReader(q))
+            {
+                EventRecord e;
+                while (list.Count < max && (e = reader.ReadEvent()) != null)
+                    using (e)
+                    {
+                        if (e.TimeCreated == null) continue;
+                        list.Add(new Line
+                        {
+                            Time = e.TimeCreated.Value, Log = log, Source = e.ProviderName, Id = e.Id.ToString(CultureInfo.InvariantCulture), Message = Describe(e),
+                            Level = e.Level == 1 ? "Critical" : e.Level == 2 ? "Error" : e.Level == 3 ? "Warning" : "Information"
+                        });
+                    }
+            }
+            return list;
         }
 
         private static void RecordShutdown(EventRecord e, List<string[]> rows)
@@ -111,6 +310,8 @@ namespace Feverfew.Collectors
                 rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Improper shutdown", Describe(e) });
             else if ((e.ProviderName == "Microsoft-Windows-WER-SystemErrorReporting" || e.ProviderName == "BugCheck") && e.Id == 1001)
                 rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Blue screen", Describe(e) });
+            else if (e.ProviderName == "Microsoft-Windows-WER-SystemErrorReporting" && e.Id == 1019)
+                rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Blue screen driver hint", Describe(e) });
         }
 
         private static string UnexpectedRestartDetail(EventRecord e)
@@ -132,11 +333,19 @@ namespace Feverfew.Collectors
 
         private static void Fill(Table t, List<Group> groups)
         {
-            foreach (var g in groups.Where(g => g.Level <= 2).OrderByDescending(g => g.Count).Take(25))
-                t.Rows.Add(new[] { g.Count.ToString(), Fmt.Time(g.Last), g.Provider, g.Id.ToString(), g.Message });
+            // Known-harmless events go last, so the real problems are at the top.
+            foreach (var g in groups.Where(g => g.Level <= 2).OrderBy(IsHarmless).ThenByDescending(g => g.Count).Take(25))
+                t.Rows.Add(new[] { g.Count.ToString(), Fmt.Time(g.Last), g.Provider, g.Id.ToString(), (IsHarmless(g) ? "(Usually harmless) " : "") + g.Message });
         }
 
-        private static void Analyze(Report r, Section s, List<Group> sys)
+        private static bool IsHarmless(Group g)
+        {
+            if (UsuallyHarmless(g.Provider, g.Id.ToString(CultureInfo.InvariantCulture))) return true;
+            // The Downloaded Maps Manager stops with "not supported" on PCs that don't use offline maps.
+            return g.Provider == "Service Control Manager" && g.Id == 7023 && (g.Message ?? "").IndexOf("Downloaded Maps Manager", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void Analyze(Report r, Section s, List<Group> sys, Evidence ev)
         {
             Func<string, int[], int> count = (provider, ids) =>
                 sys.Where(g => string.Equals(g.Provider, provider, StringComparison.OrdinalIgnoreCase) && (ids == null || ids.Contains(g.Id))).Sum(g => g.Count);
@@ -149,7 +358,8 @@ namespace Feverfew.Collectors
             int badBlock = count("disk", new[] { 7 });
             int diskErr = count("disk", new[] { 11, 51, 52, 153, 154 }) + count("stornvme", new[] { 11, 129 }) + count("storahci", new[] { 11, 129 });
             int ntfs = count("Microsoft-Windows-Ntfs", new[] { 55, 98, 130, 137 });
-            int gpu = count("Display", new[] { 4101 });
+            // Windows logs a recovered driver timeout as Display 4101; NVIDIA's driver logs its own as nvlddmkm 153.
+            int gpu = count("Display", new[] { 4101 }) + count("nvlddmkm", new[] { 153 });
             int throttle = count("Microsoft-Windows-Kernel-Processor-Power", new[] { 37 });
 
             s.Add("Unexpected restarts (Kernel-Power 41)", kernelPower);
@@ -158,28 +368,128 @@ namespace Feverfew.Collectors
             s.Add("Hardware errors (WHEA)", wheaError + " fatal, " + wheaWarn + " corrected");
             s.Add("Disk errors", badBlock + " bad block, " + diskErr + " I/O or timeout");
             s.Add("File system errors (NTFS)", ntfs);
-            s.Add("Graphics driver resets (Display 4101)", gpu);
+            s.Add("Graphics driver resets (Display 4101, nvlddmkm 153)", gpu);
             s.Add("CPU speed limited by firmware (Processor-Power 37)", throttle);
 
-            if (bugcheck > 0)
-                r.Find(bugcheck >= 3 ? Severity.Critical : Severity.Warning, bugcheck + " blue screen" + (bugcheck == 1 ? "" : "s") + " in " + Days + " days", "Windows recorded stop errors.", "Check 'Recent crash dumps' for the stop codes. Repeated different codes usually point to RAM, power or overclocking; a repeated single code usually points to a driver.");
+            if (bugcheck > 0) BlueScreens(r, bugcheck, ev);
             NoisyDrivers(r, sys);
             if (kernelPower > bugcheck)
                 r.Find(kernelPower >= 3 ? Severity.Critical : Severity.Warning, kernelPower + " unexpected restart" + (kernelPower == 1 ? "" : "s"), "The PC stopped without shutting down cleanly, and some of those restarts had no blue screen.", "Suspect the power supply, overheating, unstable overclocks, or someone holding the power button.");
             if (wheaError > 0)
-                r.Find(Severity.Critical, "Fatal hardware errors logged", wheaError + " WHEA errors. The CPU, RAM, motherboard or a PCIe device reported a failure.", "Remove any overclock, test the RAM with MemTest86, and read the WHEA message in the System errors table.");
-            if (wheaWarn >= 10)
-                r.Find(Severity.Warning, "Repeated corrected hardware errors", wheaWarn + " corrected WHEA events. Often a PCIe link or an unstable overclock.", "Reseat the graphics card and NVMe drive, then update the BIOS.");
+                r.Find(Severity.Critical, "Fatal hardware errors logged", wheaError + " WHEA errors. The CPU, RAM, motherboard or a PCIe device reported a failure.", "Remove any overclock, test the RAM with MemTest86, and check which component reported it in 'Hardware errors (WHEA)'.");
+            WheaTable(r, s, ev, wheaWarn);
             if (badBlock > 0)
                 r.Find(Severity.Critical, "Bad blocks reported on a disk", badBlock + " bad block events.", "Back up now, then test the drive with its maker's tool.");
-            if (diskErr >= 5)
-                r.Find(Severity.Warning, "Disk I/O errors or timeouts", diskErr + " events.", "Check or replace the SATA cable, reseat the drive, and update the storage driver or firmware.");
+            if (diskErr >= 5) DiskErrors(r, diskErr, ev);
             if (ntfs > 0)
                 r.Find(Severity.Warning, "File system errors", ntfs + " NTFS events.", "Run chkdsk /scan and check the drive's health.");
             if (gpu >= 3)
                 r.Find(Severity.Warning, "Graphics driver keeps resetting", gpu + " resets logged.", "Do a clean driver install, remove GPU overclocks, and check temperature and power cables.");
-            if (throttle >= 10)
-                r.Find(Severity.Warning, "CPU speed is being limited by firmware", throttle + " throttling events. Usually heat or a weak power adapter.", "Clean the cooler and check the charger or power supply.");
+            if (throttle >= 10) Throttling(r, throttle, ev);
+
+            int conflicts = count("Tcpip", new[] { 4199 });
+            if (conflicts > 0)
+                r.Find(Severity.Warning, "IP address conflict on the network", "Windows saw another device using this PC's IP address " + conflicts + " time" + (conflicts == 1 ? "" : "s") + ". The connection can drop while that happens.",
+                    "Restart the router. If you set a fixed IP address on this PC or another device, pick one outside the router's DHCP range or reserve it in the router.");
+
+            // Intel's Wi-Fi drivers log as Netwtw04, Netwtw06 and so on.
+            var wifi = sys.Where(g => g.Provider.StartsWith("Netwtw", StringComparison.OrdinalIgnoreCase) && (g.Id == 5005 || g.Id == 5002)).ToList();
+            if (wifi.Sum(g => g.Count) > 0)
+            {
+                var msg = wifi.OrderByDescending(g => g.Count).First().Message;
+                var colon = msg.IndexOf(" :", StringComparison.Ordinal);
+                var adapter = colon > 0 ? msg.Substring(0, colon).Trim() : "The Intel Wi-Fi adapter";
+                r.Find(Severity.Info, "Wi-Fi adapter reported internal errors", adapter + " failed and reset itself " + wifi.Sum(g => g.Count) + " times.",
+                    "If Wi-Fi drops out, install the latest driver from Intel's site. If errors continue with a new driver, the Wi-Fi card may be failing.");
+            }
+        }
+
+        private static void BlueScreens(Report r, int count, Evidence ev)
+        {
+            var codes = ev.StopCodes.Distinct().ToList();
+            var detail = count == 1 ? "Windows recorded one stop error" : "Windows recorded " + count + " stop errors";
+            if (codes.Count > 0) detail += ", with stop code" + (codes.Count == 1 ? " " : "s ") + string.Join(", ", codes.Take(4).Select(c => "0x" + c.ToString("X8", CultureInfo.InvariantCulture) + " (" + BugCheckName(c) + ")"));
+            detail += ".";
+            if (ev.DumpDrivers.Count > 0) detail += " The crash dump" + (ev.DumpDrivers.Count == 1 ? " shows" : "s show") + " the failure in " + string.Join(", ", ev.DumpDrivers.Take(3)) + ".";
+            var others = ev.SuspectDrivers.Where(x => !ev.DumpDrivers.Contains(x, StringComparer.OrdinalIgnoreCase)).ToList();
+            if (others.Count > 0) detail += " Windows names " + string.Join(", ", others.Take(3)) + " as possibly related.";
+            bool named = ev.DumpDrivers.Count > 0 || ev.SuspectDrivers.Count > 0;
+
+            string advice;
+            if (count == 1)
+                advice = "A single blue screen can be a one-off. If it happens again, update " + (named ? "the driver named above" : "the graphics, chipset and storage drivers") + " and check 'Recent crash dumps'.";
+            else if (codes.Count > 1)
+                advice = "Different stop codes usually point to RAM, power or an unstable overclock. Remove any overclock and test the memory.";
+            else
+                advice = "The same stop code each time usually points to a driver. " + (named ? "Update or reinstall the one named above." : "Check 'Recent crash dumps' and update the drivers it suggests.");
+            r.Find(count >= 3 ? Severity.Critical : Severity.Warning, count + " blue screen" + (count == 1 ? "" : "s") + " in " + Days + " days", detail, advice);
+        }
+
+        private static void DiskErrors(Report r, int total, Evidence ev)
+        {
+            var disks = new Dictionary<long, Row>();
+            try { foreach (var d in Wmi.Query(@"root\Microsoft\Windows\Storage", "SELECT Number, FriendlyName, BusType FROM MSFT_Disk")) if (d.Long("Number") != null) disks[d.Long("Number").Value] = d; }
+            catch (Exception) { /* name the disks by number only */ }
+
+            Func<int, string> bus = n => { Row d; return disks.TryGetValue(n, out d) ? StorageCollector.BusType(d.Long("BusType")) : null; };
+            var parts = ev.DiskErrors.OrderByDescending(kv => kv.Value).Select(kv =>
+            {
+                if (kv.Key < 0) return kv.Value + " from the storage controller";
+                Row d;
+                return disks.TryGetValue(kv.Key, out d)
+                    ? kv.Value + " on disk " + kv.Key + " (" + d.Str("FriendlyName") + ", " + bus(kv.Key) + ")"
+                    : kv.Value + " on disk " + kv.Key + ", which isn't connected now";
+            }).ToList();
+            var detail = total + " events" + (parts.Count > 0 ? ": " + string.Join("; ", parts) + "." : ".");
+
+            var worst = ev.DiskErrors.OrderByDescending(kv => kv.Value).Select(kv => (int?)kv.Key).FirstOrDefault();
+            bool allGone = ev.DiskErrors.Count > 0 && ev.DiskErrors.Keys.All(k => k >= 0 && !disks.ContainsKey(k)) && disks.Count > 0;
+            string b = worst != null && worst >= 0 ? bus(worst.Value) : null;
+            string advice;
+            if (allGone)
+                advice = "The errors came from a disk that isn't connected now, often a USB drive or memory card, so the internal drive isn't affected. If you still use that disk, copy its files off and try another port or cable.";
+            else if (b == "USB" || b == "SD")
+                advice = "Try another USB port and cable. If the errors continue, the drive itself may be failing, so copy its files off.";
+            else if (b == "NVMe" || b == "RAID")
+                advice = "Back up first. Then update the storage driver (Intel RST on many laptops) and the SSD's firmware, and check the drive's temperature.";
+            else if (b == "SATA" || b == "ATA")
+                advice = "Check or replace the SATA cable, reseat the drive, and update the storage driver or firmware.";
+            else
+                advice = "Back up first, then update the storage driver and the drive's firmware. On a desktop, reseat the drive and its cable.";
+            r.Find(allGone ? Severity.Info : Severity.Warning, "Disk I/O errors or timeouts", detail, advice);
+        }
+
+        private static void Throttling(Report r, int count, Evidence ev)
+        {
+            bool laptop = Machine.IsLaptop();
+
+            var boots = new List<DateTime>();
+            try
+            {
+                var q = new EventLogQuery("System", PathType.LogName,
+                    "*[System[Provider[@Name='Microsoft-Windows-Kernel-General'] and EventID=12 and TimeCreated[timediff(@SystemTime) <= " + Days * 86400000L + "]]]");
+                using (var reader = new EventLogReader(q))
+                {
+                    EventRecord e;
+                    while ((e = reader.ReadEvent()) != null) using (e) if (e.TimeCreated != null) boots.Add(e.TimeCreated.Value);
+                }
+            }
+            catch (Exception) { }
+            boots.Sort();
+
+            // Which start each event belongs to, and how long after that start it came.
+            var placed = ev.Throttles.Select(t => new { Time = t, Boot = boots.LastOrDefault(b => b <= t) }).ToList();
+            bool startupOnly = boots.Count > 0 && placed.Count > 0 && placed.All(p => p.Boot != default(DateTime) && (p.Time - p.Boot).TotalMinutes <= 5);
+            int bootsHit = placed.Where(p => p.Boot != default(DateTime)).Select(p => p.Boot).Distinct().Count();
+            var detail = count + " throttling events" + (boots.Count > 0 ? " across " + bootsHit + " of " + boots.Count + " starts in " + Days + " days" : "") + ".";
+
+            if (startupOnly)
+                r.Find(Severity.Info, "CPU speed limited by firmware at startup", detail + " All came within five minutes of Windows starting, which is common and usually harmless.",
+                    "Nothing to do unless games or apps stutter later. If they do, check CPU temperatures with a tool such as HWiNFO.");
+            else
+                r.Find(Severity.Warning, "CPU speed is being limited by firmware", detail + (laptop ? " Usually heat or a weak power adapter." : " Usually heat or power limits."),
+                    laptop ? "Clean the vents and fan, use the original charger, and check the power mode in Settings > System > Power."
+                           : "Check that the CPU cooler is seated and its fan spins, clean out dust, and check the power supply and the BIOS power limits.");
         }
 
         private static void NoisyDrivers(Report r, List<Group> sys)
@@ -217,22 +527,42 @@ namespace Feverfew.Collectors
                     : "One repeated code usually points to a driver. Opening a dump in Microsoft's WinDbg names it.");
         }
 
-        private static void Dumps(Report r, Section s)
+        private sealed class DumpFile
+        {
+            public FileInfo File; public uint? Code; public string Driver;
+        }
+
+        private static List<DumpFile> ReadDumps()
+        {
+            var list = new List<DumpFile>();
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Minidump");
+            if (!Scanner.IsElevated() || !Directory.Exists(dir)) return list;
+            foreach (var f in new DirectoryInfo(dir).GetFiles("*.dmp").OrderByDescending(f => f.LastWriteTime).Take(15))
+            {
+                var d = new DumpFile { File = f };
+                ReadDump(f.FullName, d);
+                list.Add(d);
+            }
+            return list;
+        }
+
+        private static void Dumps(Report r, Section s, List<DumpFile> dumps)
         {
             // Without admin rights the folder just looks absent, which would read as "no crashes".
             if (!Scanner.IsElevated()) throw new UnauthorizedAccessException();
-            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Minidump");
-            var t = s.Table("Recent crash dumps", "Date", "File", "Size", "Stop code", "Meaning");
+            var t = s.Table("Recent crash dumps", "Date", "File", "Size", "Stop code", "Meaning", "Faulting driver");
             var found = new List<KeyValuePair<DateTime, uint>>();
-            if (Directory.Exists(dir))
+            foreach (var d in dumps)
             {
-                foreach (var f in new DirectoryInfo(dir).GetFiles("*.dmp").OrderByDescending(f => f.LastWriteTime).Take(15))
+                if (d.Code != null) found.Add(new KeyValuePair<DateTime, uint>(d.File.LastWriteTime, d.Code.Value));
+                t.Rows.Add(new[]
                 {
-                    var code = ReadBugCheck(f.FullName);
-                    if (code != null) found.Add(new KeyValuePair<DateTime, uint>(f.LastWriteTime, code.Value));
-                    t.Rows.Add(new[] { Fmt.Seconds(f.LastWriteTime), f.Name, Fmt.Bytes(f.Length), code == null ? "Unreadable" : "0x" + code.Value.ToString("X8"), code == null ? "" : BugCheckName(code.Value) });
-                }
+                    Fmt.Seconds(d.File.LastWriteTime), d.File.Name, Fmt.Bytes(d.File.Length), d.Code == null ? "Unreadable" : "0x" + d.Code.Value.ToString("X8"),
+                    d.Code == null ? "" : BugCheckName(d.Code.Value), d.Driver ?? ""
+                });
             }
+            if (dumps.Any(d => d.Driver != null))
+                s.Note("The faulting driver is the one holding the code address the stop code reports. It's usually the cause, but a driver can also crash because another one corrupted memory.");
             RepeatedCrashes(r, found);
             if (t.Rows.Count > 0) s.Note("A crash dump's time is when Windows finished saving it, usually during the restart after the crash.");
             var full = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "MEMORY.DMP");
@@ -243,8 +573,22 @@ namespace Feverfew.Collectors
             }
         }
 
-        // Reads the stop code from the fixed header of a kernel dump. The dump's contents stay on the PC.
-        private static uint? ReadBugCheck(string path)
+        // Which stop code parameter holds the address of the code that failed. Others hold data addresses or status values.
+        private static int? CodeAddressParameter(uint code)
+        {
+            switch (code)
+            {
+                case 0x50: return 3;
+                case 0x0A: case 0xD1: case 0x100000D1: case 0xC5: return 4;
+                case 0x1E: case 0x3B: case 0x7E: case 0x1000007E: case 0x8E: case 0x1000008E: case 0x116: return 2;
+                default: return null;
+            }
+        }
+
+        // Reads the stop code from the fixed header of a kernel dump and, for a small (triage) dump, which loaded driver holds the
+        // failing code address. Layout: DUMP_HEADER64, then TRIAGE_DUMP64 at 0x2000 whose offsets are from the start of the file.
+        // The dump's contents stay on the PC.
+        private static void ReadDump(string path, DumpFile d)
         {
             try
             {
@@ -252,11 +596,37 @@ namespace Feverfew.Collectors
                 using (var br = new BinaryReader(fs))
                 {
                     var sig = new string(br.ReadChars(8));
-                    if (sig == "PAGEDU64") { fs.Position = 0x38; return br.ReadUInt32(); }
-                    if (sig == "PAGEDUMP") { fs.Position = 0x28; return br.ReadUInt32(); }
+                    if (sig == "PAGEDUMP") { fs.Position = 0x28; d.Code = br.ReadUInt32(); return; }
+                    if (sig != "PAGEDU64") return;
+                    fs.Position = 0x38; d.Code = br.ReadUInt32();
+                    var param = CodeAddressParameter(d.Code.Value);
+                    fs.Position = 0x40; var p = new ulong[4]; for (int i = 0; i < 4; i++) p[i] = br.ReadUInt64();
+                    fs.Position = 0xF98; const uint triage = 4;
+                    if (param == null || br.ReadUInt32() != triage) return;
+                    d.Driver = DriverAt(fs, br, p[param.Value - 1]);
                 }
             }
-            catch (Exception) { }
+            catch (Exception) { /* keep whatever was read */ }
+        }
+
+        private static string DriverAt(FileStream fs, BinaryReader br, ulong address)
+        {
+            const long triageHeader = 0x2000, entrySize = 0x90, dllBase = 8 + 0x30, sizeOfImage = 8 + 0x40;
+            fs.Position = triageHeader + 0x30;
+            uint listOffset = br.ReadUInt32(), count = br.ReadUInt32();
+            if (count == 0 || count > 4096 || listOffset + count * entrySize > fs.Length) return null;
+            for (long i = 0; i < count; i++)
+            {
+                long entry = listOffset + i * entrySize;
+                fs.Position = entry; uint nameOffset = br.ReadUInt32();
+                fs.Position = entry + dllBase; ulong start = br.ReadUInt64();
+                fs.Position = entry + sizeOfImage; uint size = br.ReadUInt32();
+                if (address < start || address >= start + size) continue;
+                if (nameOffset + 4 > fs.Length) return null;
+                fs.Position = nameOffset; uint chars = br.ReadUInt32();
+                if (chars == 0 || chars > 260 || nameOffset + 4 + chars * 2 > fs.Length) return null;
+                return System.Text.Encoding.Unicode.GetString(br.ReadBytes((int)chars * 2));
+            }
             return null;
         }
 

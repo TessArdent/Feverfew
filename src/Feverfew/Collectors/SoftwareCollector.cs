@@ -48,6 +48,9 @@ namespace Feverfew.Collectors
                     r.Find(Severity.Warning, "Firewall is off", "Off for: " + string.Join(", ", off) + " networks. Third-party security software sometimes does this on purpose.", "Check Windows Security > Firewall & network protection.");
             });
 
+            Guard.Try(s, "System Protection", () => SystemProtection(r, s));
+            Guard.Try(s, "Recovery environment", () => RecoveryEnvironment(r, s));
+
             Guard.Try(s, "Windows updates", () =>
             {
                 var fixes = Wmi.Cim("SELECT HotFixID, Description, InstalledOn FROM Win32_QuickFixEngineering")
@@ -64,8 +67,16 @@ namespace Feverfew.Collectors
             {
                 var plan = Wmi.Query(@"root\cimv2\power", "SELECT ElementName, IsActive FROM Win32_PowerPlan").FirstOrDefault(p => p.Bool("IsActive") == true);
                 if (plan != null) s.Add("Power plan", plan.Str("ElementName"));
+            });
+
+            // Separate from the power plan, which needs admin rights to read.
+            Guard.Try(s, "Fast Startup", () =>
+            {
                 var fast = Reg.Machine(@"SYSTEM\CurrentControlSet\Control\Session Manager\Power", "HiberbootEnabled");
                 if (fast != null) s.Add("Fast Startup", Convert.ToInt32(fast) == 1 ? "On" : "Off");
+                if (fast != null && Convert.ToInt32(fast) == 1)
+                    r.Find(Severity.Info, "Fast Startup is on", "Shut down saves Windows' core and drivers to disk instead of closing them, so it doesn't clear driver problems the way Restart does.",
+                        "When troubleshooting, use Restart rather than Shut down. If problems keep coming back after a shutdown, turn Fast Startup off in Control Panel > Power Options > Choose what the power buttons do.");
             });
         }
 
@@ -102,8 +113,9 @@ namespace Feverfew.Collectors
             {
                 var services = Wmi.Cim("SELECT Name, DisplayName, State, StartMode, ExitCode FROM Win32_Service");
                 var t = s.Table("Automatic services that aren't running", "Service", "Name", "State", "Exit code");
-                foreach (var v in services.Where(v => v.Str("StartMode") == "Auto" && v.Str("State") != "Running").OrderBy(v => v.Str("DisplayName")))
-                    t.Rows.Add(new[] { v.Str("DisplayName"), v.Str("Name"), v.Str("State"), v.Str("ExitCode") });
+                foreach (var v in services.Where(v => v.Str("StartMode") == "Auto" && v.Str("State") != "Running")
+                             .OrderBy(v => StopsByItself(v.Str("Name"))).ThenBy(v => v.Str("DisplayName")))
+                    t.Rows.Add(new[] { v.Str("DisplayName") + (StopsByItself(v.Str("Name")) ? " (normally stops by itself)" : ""), v.Str("Name"), v.Str("State"), v.Str("ExitCode") });
                 s.Note("Some automatic services stop by themselves when they have no work to do, so a stopped service isn't always a fault.");
                 var down = services.Where(v => EssentialServices.Contains(v.Str("Name"), StringComparer.OrdinalIgnoreCase) && v.Str("State") != "Running").ToList();
                 if (down.Count > 0)
@@ -122,6 +134,66 @@ namespace Feverfew.Collectors
             });
         }
 
+        // Automatic services that run briefly and stop, or start only when something triggers them.
+        private static readonly string[] SelfStopping = { "MapsBroker", "GoogleUpdater", "gupdate", "edgeupdate", "gpsvc", "sppsvc", "RemoteRegistry", "TrustedInstaller", "WbioSrvc", "Intel(R) TPM Provisioning Service", "Intel(R) Platform License Manager Service", "BITS", "UsoSvc", "sedsvc" };
+
+        private static bool StopsByItself(string name)
+        {
+            return SelfStopping.Any(n => (name ?? "").StartsWith(n, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Restore points: whether Windows makes them, how many exist, and whether they've been lost for lack of space.
+        private static void SystemProtection(Report r, Section s)
+        {
+            var interval = Reg.Machine(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore", "RPSessionInterval");
+            bool? on = interval == null ? (bool?)null : Convert.ToInt32(interval) == 1;
+            s.Add("System Protection (restore points)", on == null ? "Unknown" : on.Value ? "On" : "Off");
+
+            if (Scanner.IsElevated())
+            {
+                Guard.Try(s, "Restore points", () =>
+                {
+                    var points = Wmi.Query(@"root\default", "SELECT CreationTime FROM SystemRestore").Select(p => p.Date("CreationTime")).Where(d => d != null).ToList();
+                    s.Add("Restore points", points.Count == 0 ? "None" : points.Count + ", newest " + Fmt.Time(points.Max()));
+                });
+                Guard.Try(s, "Restore point space", () =>
+                {
+                    var store = Wmi.Cim("SELECT UsedSpace, MaxSpace FROM Win32_ShadowStorage").FirstOrDefault();
+                    if (store != null) s.Add("Restore point space", Fmt.Bytes(store.Long("UsedSpace")) + " used of " + Fmt.Bytes(store.Long("MaxSpace")));
+                });
+            }
+
+            // Volsnap 25 and 36: shadow copies (restore points) deleted or aborted because their storage couldn't grow.
+            int lost = 0;
+            var q = new System.Diagnostics.Eventing.Reader.EventLogQuery("System", System.Diagnostics.Eventing.Reader.PathType.LogName,
+                "*[System[Provider[@Name='volsnap'] and (EventID=25 or EventID=36) and TimeCreated[timediff(@SystemTime) <= " + 30 * 86400000L + "]]]");
+            using (var reader = new System.Diagnostics.Eventing.Reader.EventLogReader(q))
+            {
+                System.Diagnostics.Eventing.Reader.EventRecord e;
+                while ((e = reader.ReadEvent()) != null) using (e) lost++;
+            }
+            if (lost > 0)
+                r.Find(Severity.Warning, "Restore points were deleted for lack of space", "Windows deleted or abandoned restore points " + lost + " time" + (lost == 1 ? "" : "s") + " in the last 30 days because their storage limit was too small.",
+                    "Open Create a restore point (sysdm.cpl), choose the C: drive, press Configure and raise Max Usage to 5 to 10%.");
+            else if (on == false)
+                r.Find(Severity.Info, "System Protection is off", "Windows isn't keeping restore points, so a bad driver or update can't be rolled back that way, and Repair tools' restore point will fail.",
+                    "Open Create a restore point (sysdm.cpl), choose the C: drive, press Configure and turn on system protection with 5 to 10% of the drive.");
+        }
+
+        // The Windows Recovery Environment runs Startup Repair and asks for the BitLocker key when Windows can't start.
+        private static void RecoveryEnvironment(Report r, Section s)
+        {
+            var path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"Recovery\ReAgent.xml");
+            if (!System.IO.File.Exists(path)) { s.Add("Recovery environment", "Unknown"); return; }
+            var doc = System.Xml.Linq.XDocument.Load(path);
+            var state = doc.Descendants("InstallState").Select(x => (string)x.Attribute("state")).FirstOrDefault();
+            bool enabled = state == "1";
+            s.Add("Recovery environment (WinRE)", enabled ? "On" : "Off");
+            if (!enabled)
+                r.Find(Severity.Warning, "Windows Recovery Environment is off", "If Windows stops starting, Startup Repair, System Restore and Reset this PC won't be available from the boot menu.",
+                    "From an administrator prompt run: reagentc /enable. If that fails, the recovery partition may be missing or too small.");
+        }
+
         private static long SafeMemory(Process p)
         {
             try { return p.WorkingSet64; }
@@ -138,14 +210,36 @@ namespace Feverfew.Collectors
                 foreach (var name in key.GetSubKeyNames())
                     using (var k = key.OpenSubKey(name))
                     {
-                        var display = k == null ? null : k.GetValue("DisplayName") as string;
-                        if (string.IsNullOrWhiteSpace(display) || Convert.ToInt32(k.GetValue("SystemComponent", 0)) == 1) continue;
-                        apps[display] = new[]
-                        {
-                            display, k.GetValue("DisplayVersion") as string ?? "", k.GetValue("Publisher") as string ?? "", k.GetValue("InstallDate") as string ?? ""
-                        };
+                        if (k == null) continue;
+                        AddProgram(apps, k);
                     }
             }
+        }
+
+        // Installers write InstallDate as yyyyMMdd, but some write Unix seconds or an impossible date such as 20254202.
+        private static string InstallDate(string raw)
+        {
+            raw = (raw ?? "").Trim();
+            DateTime d;
+            if (raw.Length == 8 && DateTime.TryParseExact(raw, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out d))
+                return Fmt.Date(d);
+            long seconds;
+            if (raw.Length >= 9 && raw.Length <= 10 && long.TryParse(raw, out seconds))
+            {
+                d = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(seconds).ToLocalTime();
+                if (d.Year >= 1995 && d <= DateTime.Now.AddDays(1)) return Fmt.Date(d);
+            }
+            return "";
+        }
+
+        private static void AddProgram(Dictionary<string, string[]> apps, RegistryKey k)
+        {
+            var display = k.GetValue("DisplayName") as string;
+            if (string.IsNullOrWhiteSpace(display) || Convert.ToInt32(k.GetValue("SystemComponent", 0)) == 1) return;
+            apps[display] = new[]
+            {
+                display, k.GetValue("DisplayVersion") as string ?? "", k.GetValue("Publisher") as string ?? "", InstallDate(k.GetValue("InstallDate") as string)
+            };
         }
     }
 }
