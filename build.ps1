@@ -6,12 +6,23 @@ param([switch]$Unsigned)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+function Find-Hawthorn {
+    $cmd = Get-Command hawthorn -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    # The shim lives in ~\bin, which only Git Bash has on PATH, and `hawthorn setup`'s PATH fix
+    # reaches only programs started afterwards.
+    $shim = Join-Path $HOME 'bin\hawthorn.cmd'
+    if (Test-Path $shim) { return $shim }
+    return $null
+}
+
 function Invoke-Sign([string[]]$Files) {
     if ($Unsigned) { Write-Host "not signed (-Unsigned): $($Files -join ', ')"; return }
-    if (-not (Get-Command hawthorn -ErrorAction SilentlyContinue)) {
+    $hawthorn = Find-Hawthorn
+    if (-not $hawthorn) {
         throw 'hawthorn not on PATH: run `python <Hawthorn>\hawthorn.py setup`, or build with -Unsigned'
     }
-    & hawthorn sign @Files
+    & $hawthorn sign @Files
     if ($LASTEXITCODE -ne 0) { throw "hawthorn sign failed: $($Files -join ', ') not signed" }
 }
 

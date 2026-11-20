@@ -5,7 +5,7 @@ A Windows diagnostics tool (WPF, .NET Framework 4.8). It collects hardware and s
 ## Build and test
 
 - `.\test.ps1` builds the app and the tests and runs them. The last line is PASS or FAIL. It needs the .NET SDK and signtool at `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe`.
-- `.\build.ps1` builds the release installer `dist\setup.exe` (Inno Setup 6) and signs it in two `hawthorn sign` batches: Feverfew.exe before packing, then setup.exe. It needs a registered YubiKey plugged in and asks for its PIN once per batch. `-Unsigned` builds without the key, and `hawthorn release` refuses that build. Only the user can build signed: agents use `-Unsigned`.
+- `.\build.ps1` builds the release installer `dist\setup.exe` (Inno Setup 6) and signs it in two `hawthorn sign` batches: Feverfew.exe before packing, then setup.exe. It finds `hawthorn` on PATH or at `~binhawthorn.cmd`, and needs a registered YubiKey plugged in and asks for its PIN once per batch. `-Unsigned` builds without the key, and `hawthorn release` refuses that build. Only the user can build signed: agents use `-Unsigned`.
 
 ## Key folders
 
