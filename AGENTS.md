@@ -31,4 +31,5 @@ A Windows diagnostics tool (WPF, .NET Framework 4.8). It collects hardware and s
 ## Traps
 
 - `X509VerificationFlags.AllowUnknownCertificateAuthority` also accepts a *partial* chain that ends at the leaf. That's why `SignatureCheck` compares the chain's last element with the pinned root instead of trusting `Build()`.
+- Never launch the built exe or installer to check it: it opens a window on the user's desktop. Inspect the installer with innounp or 7-Zip, and check signatures with `hawthorn sign --verify`.
 - signtool won't sign with a certificate whose EKU leaves out code signing. To test a "no Code Signing EKU" leaf, make it with no EKU extension at all.
