@@ -314,6 +314,12 @@ namespace Feverfew
                 Process.Start(new ProcessStartInfo(setup) { UseShellExecute = true });
                 Close();
             }
+            catch (UpdateRefusedException ex)
+            {
+                UpdateStatus.Text = "Update not installed: " + ex.Message;
+                if (await Ask("Update not installed", ex.Message + "\n\nYou can check the release yourself on its GitHub page:\n" + ex.PageUrl, "Open release page"))
+                    OpenUnelevated(ex.PageUrl);
+            }
             catch (Exception ex)
             {
                 UpdateStatus.Text = "Couldn't check for updates: " + ex.Message;

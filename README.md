@@ -72,7 +72,14 @@ The report comes as an `.html` file to read and a `.json` file with the same con
 
 ## Updates
 
-**Check for updates** looks at this repository's latest release. If there's a newer version, Feverfew offers to download `setup.exe`, verifies its SHA-256 against the hash GitHub publishes for that file, and runs it. Publishing a new GitHub release with a `setup.exe` asset and a tag like `v1.3.0` is all it takes to ship an update.
+**Check for updates** looks at this repository's latest release. If there's a newer version, Feverfew offers to download `setup.exe` and runs it only if both checks pass:
+
+- its SHA-256 matches the hash GitHub publishes for that file, which protects the download;
+- it carries an intact Authenticode signature from a code-signing certificate issued by the publisher's own root CA, whose public certificate is built into Feverfew. This protects against a changed release, because a changed release can't carry that signature.
+
+If either check fails, Feverfew deletes the file, says why and links to the release page. The root isn't trusted by Windows, so Windows doesn't show the installer as signed by a known publisher. Feverfew does its own check against the built-in root.
+
+Versions up to 1.3.0 check only the hash, so the first signed release installs through them as before. Every later version refuses unsigned updates. To ship an update, publish a GitHub release with a **signed** `setup.exe` asset and a tag like `v1.4.0`.
 
 ## Command line
 
@@ -91,7 +98,7 @@ You need the [.NET SDK](https://dotnet.microsoft.com/download) (8 or later) and 
 .\build.ps1
 ```
 
-This creates `dist\setup.exe`. The app targets .NET Framework 4.8, which comes with current Windows 10 and 11, so friends don't have to install a runtime.
+This creates `dist\setup.exe`. `.\test.ps1` builds and runs the tests (it needs the Windows SDK's signtool) and prints PASS or FAIL. The app targets .NET Framework 4.8, which comes with current Windows 10 and 11, so friends don't have to install a runtime.
 
 ## License
 

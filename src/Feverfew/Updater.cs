@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -20,6 +21,13 @@ namespace Feverfew
         public string Sha256;
         public bool IsNewer { get { return Latest > Current; } }
         public bool CanDownload { get { return DownloadUrl != null && Sha256 != null; } }
+    }
+
+    /// <summary>A downloaded update that failed a check. It has been deleted; the message says why.</summary>
+    public sealed class UpdateRefusedException : Exception
+    {
+        public readonly string PageUrl;
+        public UpdateRefusedException(string message, string pageUrl) : base(message) { PageUrl = pageUrl; }
     }
 
     /// <summary>Checks the project's GitHub releases. Only runs when the user asks.</summary>
@@ -76,25 +84,51 @@ namespace Feverfew
             return info;
         }
 
-        /// <summary>Downloads the installer to a new private temp folder and rejects it unless its hash matches.</summary>
+        /// <summary>
+        /// Downloads the installer to a new private temp folder and rejects it unless its hash matches and it is
+        /// Authenticode-signed by a certificate that chains to a pinned root (see <see cref="PinnedRoots"/>).
+        /// </summary>
         public static string Download(UpdateInfo info)
         {
             var folder = Path.Combine(Path.GetTempPath(), "Feverfew-update-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(folder);
             var path = Path.Combine(folder, AssetName);
-            using (var client = Client()) client.DownloadFile(info.DownloadUrl, path);
-
-            string actual;
-            using (var sha = SHA256.Create())
-            using (var file = File.OpenRead(path))
-                actual = BitConverter.ToString(sha.ComputeHash(file)).Replace("-", "");
-
-            if (!string.Equals(actual, info.Sha256, StringComparison.OrdinalIgnoreCase))
+            try
             {
-                Directory.Delete(folder, true);
-                throw new InvalidDataException("The downloaded installer failed its integrity check and was deleted.");
+                using (var client = Client()) client.DownloadFile(info.DownloadUrl, path);
+
+                string actual;
+                using (var sha = SHA256.Create())
+                using (var file = File.OpenRead(path))
+                    actual = BitConverter.ToString(sha.ComputeHash(file)).Replace("-", "");
+                if (!string.Equals(actual, info.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new UpdateRefusedException("The downloaded installer failed its integrity check and was deleted.", info.PageUrl);
+
+                string reason;
+                if (!SignatureCheck.Verify(path, PinnedRoots(), out reason))
+                    throw new UpdateRefusedException("The downloaded installer was deleted because " + reason + ". Feverfew only installs updates signed by its publisher.", info.PageUrl);
+                return path;
             }
-            return path;
+            catch
+            {
+                try { Directory.Delete(folder, true); } catch { }
+                throw;
+            }
+        }
+
+        /// <summary>The publisher's code-signing root certificates, embedded from Trust\*.cer (public certificates only).</summary>
+        public static List<X509Certificate2> PinnedRoots()
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var roots = new List<X509Certificate2>();
+            foreach (var name in assembly.GetManifestResourceNames().Where(n => n.StartsWith("Feverfew.Trust.", StringComparison.Ordinal) && n.EndsWith(".cer", StringComparison.OrdinalIgnoreCase)))
+            using (var stream = assembly.GetManifestResourceStream(name))
+            using (var memory = new MemoryStream())
+            {
+                stream.CopyTo(memory);
+                roots.Add(new X509Certificate2(memory.ToArray()));
+            }
+            return roots;
         }
 
         /// <summary>True when this copy is the per-user install, so running setup as this user replaces it.</summary>

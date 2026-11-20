@@ -27,6 +27,8 @@
     <Reference Include="System.Web" />
     <Reference Include="System.Web.Extensions" />
     <Resource Include="..\..\assets\feverfew.ico" Link="feverfew.ico" />
+    <!-- The publisher's code-signing roots (public .cer only). Updates must be signed under one of them. -->
+    <EmbeddedResource Include="Trust\*.cer" LogicalName="Feverfew.Trust.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>
