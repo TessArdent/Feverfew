@@ -95,4 +95,4 @@ This creates `dist\setup.exe`. The app targets .NET Framework 4.8, which comes w
 
 ## License
 
-[MIT](LICENSE)
+Proprietary. All rights reserved. See [LICENSE](LICENSE).
