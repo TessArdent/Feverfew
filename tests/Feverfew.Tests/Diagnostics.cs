@@ -16,6 +16,22 @@ internal static partial class Program
     {
         FastStartupResumeTests();
         AmdWritesTests();
+        MemorySlotTests();
+    }
+
+    private static void MemorySlotTests()
+    {
+        Func<string[], string> show = a => string.Join(" | ", a);
+        var gigabyte = MemorySlots.Labels(new[] { "DIMM 1", "DIMM 1" }, new[] { "P0 CHANNEL A", "P0 CHANNEL B" });
+        Check("duplicate locators with distinct bank labels show both", show(gigabyte) == "P0 CHANNEL A / DIMM 1 | P0 CHANNEL B / DIMM 1", show(gigabyte));
+        var empty = MemorySlots.Labels(new[] { "DIMM A2", "DIMM B2" }, new[] { "", null });
+        Check("an empty bank label keeps the locator alone", show(empty) == "DIMM A2 | DIMM B2", show(empty));
+        var same = MemorySlots.Labels(new[] { "ChannelA-DIMM0", "ChannelB-DIMM0" }, new[] { "BANK 0", "BANK 0" });
+        Check("the same bank label on every module is left out", show(same) == "ChannelA-DIMM0 | ChannelB-DIMM0", show(same));
+        var echo = MemorySlots.Labels(new[] { "DIMM 1" }, new[] { "dimm 1" });
+        Check("a bank label equal to the locator is left out", show(echo) == "DIMM 1", show(echo));
+        var noLocator = MemorySlots.Labels(new[] { "", "" }, new[] { "P0 CHANNEL A", "P0 CHANNEL B" });
+        Check("a missing locator shows the bank label alone", show(noLocator) == "P0 CHANNEL A | P0 CHANNEL B", show(noLocator));
     }
 
     private static void AmdWritesTests()

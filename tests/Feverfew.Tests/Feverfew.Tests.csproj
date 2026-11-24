@@ -15,6 +15,7 @@
     <Compile Include="..\..\src\Feverfew\Redactor.cs" Link="Redactor.cs" />
     <Compile Include="..\..\src\Feverfew\Collectors\FastStartupResume.cs" Link="Collectors\FastStartupResume.cs" />
     <Compile Include="..\..\src\Feverfew\Collectors\AmdWritesVerdict.cs" Link="Collectors\AmdWritesVerdict.cs" />
+    <Compile Include="..\..\src\Feverfew\Collectors\MemorySlots.cs" Link="Collectors\MemorySlots.cs" />
     <None Include="..\..\src\Feverfew\Trust\*.cer" Link="Trust\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

@@ -84,6 +84,8 @@ namespace Feverfew.Collectors
                 var sticks = Wmi.Cim("SELECT * FROM Win32_PhysicalMemory");
                 var t = s.Table("Installed modules", "Slot", "Size", "Rated speed", "Running at", "Maker", "Part number", "Serial");
                 long total = 0;
+                var slots = MemorySlots.Labels(sticks.Select(m => m.Str("DeviceLocator")).ToList(), sticks.Select(m => m.Str("BankLabel")).ToList());
+                int slot = 0;
                 foreach (var m in sticks)
                 {
                     total += m.Long("Capacity") ?? 0;
@@ -91,7 +93,7 @@ namespace Feverfew.Collectors
                     bool fromPart = rated > (m.Long("Speed") ?? 0);
                     t.Rows.Add(new[]
                     {
-                        m.Str("DeviceLocator"), Fmt.Bytes(m.Long("Capacity")), rated + " MT/s" + (fromPart ? " (from part number)" : ""), m.Str("ConfiguredClockSpeed") + " MT/s",
+                        slots[slot++], Fmt.Bytes(m.Long("Capacity")), rated + " MT/s" + (fromPart ? " (from part number)" : ""), m.Str("ConfiguredClockSpeed") + " MT/s",
                         m.Str("Manufacturer"), m.Str("PartNumber"), r.Private(m.Str("SerialNumber"))
                     });
                 }
