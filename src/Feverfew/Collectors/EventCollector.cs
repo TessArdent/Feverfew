@@ -29,7 +29,9 @@ namespace Feverfew.Collectors
             public readonly List<uint> StopCodes = new List<uint>();
             public readonly List<string> SuspectDrivers = new List<string>();
             public readonly List<string> DumpDrivers = new List<string>(); // from crash dumps in the last Days days
-            public readonly List<DateTime> Restarts = new List<DateTime>(); // Kernel-Power 41, newest first
+            public readonly List<DateTime> Restarts = new List<DateTime>(); // Kernel-Power 41 that weren't failed resumes, newest first
+            public List<FastStartupResume.Failure> ResumeFailures = new List<FastStartupResume.Failure>(); // Kernel-Boot 29
+            public int FailedResumeRestarts; // Kernel-Power 41 logged because a Fast Startup resume failed
             public readonly Dictionary<string, Whea> Whea = new Dictionary<string, Whea>(StringComparer.OrdinalIgnoreCase);
         }
 
@@ -114,7 +116,10 @@ namespace Feverfew.Collectors
             else if (Is(e, "Microsoft-Windows-WHEA-Logger"))
                 TrackWhea(e, ev);
             else if (Is(e, "Microsoft-Windows-Kernel-Power") && e.Id == 41 && e.TimeCreated != null)
-                ev.Restarts.Add(e.TimeCreated.Value);
+            {
+                if (FastStartupResume.Match(e.TimeCreated.Value, ev.ResumeFailures) != null) ev.FailedResumeRestarts++;
+                else ev.Restarts.Add(e.TimeCreated.Value);
+            }
             else if (Is(e, "Microsoft-Windows-Kernel-Processor-Power") && e.Id == 37 && e.TimeCreated != null)
                 ev.Throttles.Add(e.TimeCreated.Value);
             else if (Is(e, "Microsoft-Windows-WER-SystemErrorReporting") && e.Id == 1001 || Is(e, "BugCheck") && e.Id == 1001)
@@ -196,13 +201,17 @@ namespace Feverfew.Collectors
                 var evidence = new Evidence();
                 foreach (var d in dumps.Where(d => d.Driver != null && d.File.LastWriteTime >= DateTime.Now.AddDays(-Days)))
                     if (!evidence.DumpDrivers.Contains(d.Driver, StringComparer.OrdinalIgnoreCase)) evidence.DumpDrivers.Add(d.Driver);
-                var sys = Scan("System", e => { RecordShutdown(e, shutdowns); Track(e, evidence); });
+                // Read first: the scan goes newest first, so it meets each Kernel-Power 41 before the Kernel-Boot 29 that explains it.
+                try { evidence.ResumeFailures = ReadResumeFailures(); } catch (Exception) { /* every Kernel-Power 41 then counts as a restart */ }
+                var sys = Scan("System", e => { RecordShutdown(e, shutdowns, evidence.ResumeFailures); Track(e, evidence); });
                 Fill(s.Table("Most frequent System errors", "Count", "Last seen", "Source", "ID", "Message"), sys);
                 if (shutdowns.Count > 0)
                 {
                     var t = s.Table("Unexpected shutdowns and blue screens", "Logged", "Event", "Details");
                     t.Rows.AddRange(shutdowns);
                     s.Note("Windows logs these when the PC starts again, so the crash itself came earlier. An 'improper shutdown' message gives Windows' last recorded time before the stop.");
+                    if (evidence.FailedResumeRestarts > 0)
+                        s.Note("When a Fast Startup resume fails, Windows also logs an unexpected restart and an improper shutdown dated at the earlier shutdown. Those aren't crashes.");
                 }
                 Analyze(r, s, sys, evidence);
                 Guard.Try(s, "Crash timelines", () => Timelines(s, evidence.Restarts));
@@ -301,11 +310,41 @@ namespace Feverfew.Collectors
             return list;
         }
 
-        private static void RecordShutdown(EventRecord e, List<string[]> rows)
+        private static List<FastStartupResume.Failure> ReadResumeFailures()
+        {
+            var list = new List<FastStartupResume.Failure>();
+            var q = new EventLogQuery("System", PathType.LogName,
+                "*[System[Provider[@Name='Microsoft-Windows-Kernel-Boot'] and EventID=29 and TimeCreated[timediff(@SystemTime) <= " + Days * 86400000L + "]]]");
+            using (var reader = new EventLogReader(q))
+            {
+                EventRecord e;
+                while (list.Count < 1000 && (e = reader.ReadEvent()) != null)
+                    using (e)
+                    {
+                        if (e.TimeCreated == null) continue;
+                        string status = "";
+                        try { if (e.Properties.Count > 0) status = FormatCode(e.Properties[0].Value); } catch (Exception) { }
+                        if (!System.Text.RegularExpressions.Regex.IsMatch(status, "^0x[0-9a-f]{8}$"))
+                        {
+                            var m = System.Text.RegularExpressions.Regex.Match(Describe(e), @"0x[0-9a-fA-F]{8}");
+                            status = m.Success ? m.Value.ToLowerInvariant() : "";
+                        }
+                        list.Add(new FastStartupResume.Failure { Time = e.TimeCreated.Value, Status = status });
+                    }
+            }
+            return list;
+        }
+
+        private static void RecordShutdown(EventRecord e, List<string[]> rows, List<FastStartupResume.Failure> resumeFailures)
         {
             if (rows.Count >= MaxShutdownRows) return;
             if (e.ProviderName == "Microsoft-Windows-Kernel-Power" && e.Id == 41)
-                rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Unexpected restart", UnexpectedRestartDetail(e) });
+            {
+                var failed = e.TimeCreated == null ? null : FastStartupResume.Match(e.TimeCreated.Value, resumeFailures);
+                rows.Add(failed != null
+                    ? new[] { Fmt.Seconds(e.TimeCreated), "Fast Startup failed to resume", FastStartupResume.Detail(failed) }
+                    : new[] { Fmt.Seconds(e.TimeCreated), "Unexpected restart", UnexpectedRestartDetail(e) });
+            }
             else if (e.ProviderName == "EventLog" && e.Id == 6008)
                 rows.Add(new[] { Fmt.Seconds(e.TimeCreated), "Improper shutdown", Describe(e) });
             else if ((e.ProviderName == "Microsoft-Windows-WER-SystemErrorReporting" || e.ProviderName == "BugCheck") && e.Id == 1001)
@@ -362,7 +401,11 @@ namespace Feverfew.Collectors
             int gpu = count("Display", new[] { 4101 }) + count("nvlddmkm", new[] { 153 });
             int throttle = count("Microsoft-Windows-Kernel-Processor-Power", new[] { 37 });
 
-            s.Add("Unexpected restarts (Kernel-Power 41)", kernelPower);
+            // Failed Fast Startup resumes log Kernel-Power 41 too, but they aren't crashes.
+            int failedResumes = Math.Min(ev.FailedResumeRestarts, kernelPower);
+            int restarts = kernelPower - failedResumes;
+            s.Add("Unexpected restarts (Kernel-Power 41)", FastStartupResume.RestartFact(kernelPower, failedResumes));
+            if (ev.ResumeFailures.Count > 0) s.Add("Fast Startup resume failures (Kernel-Boot 29)", ev.ResumeFailures.Count);
             s.Add("Improper shutdowns (EventLog 6008)", dirty);
             s.Add("Blue screens (BugCheck 1001)", bugcheck);
             s.Add("Hardware errors (WHEA)", wheaError + " fatal, " + wheaWarn + " corrected");
@@ -373,8 +416,11 @@ namespace Feverfew.Collectors
 
             if (bugcheck > 0) BlueScreens(r, bugcheck, ev);
             NoisyDrivers(r, sys);
-            if (kernelPower > bugcheck)
-                r.Find(kernelPower >= 3 ? Severity.Critical : Severity.Warning, kernelPower + " unexpected restart" + (kernelPower == 1 ? "" : "s"), "The PC stopped without shutting down cleanly, and some of those restarts had no blue screen.", "Suspect the power supply, overheating, unstable overclocks, or someone holding the power button.");
+            var restartSeverity = FastStartupResume.RestartSeverity(restarts, bugcheck);
+            if (restartSeverity != null)
+                r.Find(restartSeverity.Value, restarts + " unexpected restart" + (restarts == 1 ? "" : "s"), "The PC stopped without shutting down cleanly, and some of those restarts had no blue screen.", "Suspect the power supply, overheating, unstable overclocks, or someone holding the power button.");
+            var resumeAdvice = FastStartupResume.Advise(r.Signals.FastStartupFinding, r.Signals.FastStartup, ev.ResumeFailures.Count);
+            if (resumeAdvice != null) r.Findings.Add(resumeAdvice);
             if (wheaError > 0)
                 r.Find(Severity.Critical, "Fatal hardware errors logged", wheaError + " WHEA errors. The CPU, RAM, motherboard or a PCIe device reported a failure.", "Remove any overclock, test the RAM with MemTest86, and check which component reported it in 'Hardware errors (WHEA)'.");
             WheaTable(r, s, ev, wheaWarn);

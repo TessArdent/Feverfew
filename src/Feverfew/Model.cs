@@ -64,6 +64,8 @@ namespace Feverfew
         public int? CpuCores;
         public int? CpuMhz;
         public int? WindowsBuild;
+        public bool? FastStartup;
+        public Finding FastStartupFinding; // the "Fast Startup is on" finding, which the event log step extends
     }
 
     public sealed class Report

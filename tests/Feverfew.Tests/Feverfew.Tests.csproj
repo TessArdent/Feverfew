@@ -11,6 +11,9 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\Feverfew\SignatureCheck.cs" Link="SignatureCheck.cs" />
+    <Compile Include="..\..\src\Feverfew\Model.cs" Link="Model.cs" />
+    <Compile Include="..\..\src\Feverfew\Redactor.cs" Link="Redactor.cs" />
+    <Compile Include="..\..\src\Feverfew\Collectors\FastStartupResume.cs" Link="Collectors\FastStartupResume.cs" />
     <None Include="..\..\src\Feverfew\Trust\*.cer" Link="Trust\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

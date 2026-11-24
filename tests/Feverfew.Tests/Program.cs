@@ -8,10 +8,10 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Feverfew;
 
-// Headless checks for the updater's signature check. Prints PASS or FAIL per case and overall.
+// Headless checks for the updater's signature check (and, in Diagnostics.cs, the collectors' pure logic). Prints PASS or FAIL per case and overall.
 // Certificates are made in memory for this run and handed to signtool as PFX files in a temp folder:
 // nothing is added to a certificate store.
-internal static class Program
+internal static partial class Program
 {
     private const string SignTool = @"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe";
     private static int failures;
@@ -20,6 +20,15 @@ internal static class Program
     {
         var work = Path.Combine(Path.GetTempPath(), "feverfew-sigtest-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
+        try
+        {
+            Diagnostics();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("FAIL  diagnostics tests crashed: " + e);
+            failures++;
+        }
         try
         {
             Run(work);
