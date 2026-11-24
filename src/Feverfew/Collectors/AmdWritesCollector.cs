@@ -8,6 +8,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
+using CopyState = Feverfew.Collectors.AmdWritesVerdict.CopyState;
 
 namespace Feverfew.Collectors
 {
@@ -20,15 +21,12 @@ namespace Feverfew.Collectors
     {
         public const string CopyPathForCommands = @"%SystemRoot%\System32\config\systemprofile\AppData\Local\AMD\atieclxx.exe";
         private static readonly string CopyPath = Environment.ExpandEnvironmentVariables(CopyPathForCommands);
-        public static readonly Version FixedIn = new Version(26, 11, 1);
+        public static readonly Version FixedIn = AmdWritesVerdict.FixedIn;
         private const string LocalSystem = "S-1-5-18";
         private const int SampleMs = 4000;
         // The copy happens every second while the bug is active, so an older change means it has stopped.
         private static readonly TimeSpan RecentChange = TimeSpan.FromSeconds(10);
-        // Normal use writes almost nothing. Reports of the bug range from 300 KB/s to 5 MB/s.
-        private const double HighWriteBytesPerSecond = 100 * 1024;
-
-        public enum CopyState { Missing, Rewriting, Quiet, Blocked }
+        private const double HighWriteBytesPerSecond = AmdWritesVerdict.HighWriteBytesPerSecond;
 
         public static void Collect(Report r)
         {
@@ -77,12 +75,12 @@ namespace Feverfew.Collectors
                 Guard.Try(s, "Damage estimate", () => Assess(r, s, copy.Value, rate, DriverInstalled(before)));
 
             bool rewriting = copy == CopyState.Rewriting;
-            bool heavy = rate != null && rate >= HighWriteBytesPerSecond;
+            var verdict = AmdWritesVerdict.Decide(installed, copy, rate);
             var update = installed == null
                 ? "Update AMD Software to 26.11.1 or later, which fixes this."
                 : "Update AMD Software from " + installed + " to 26.11.1 or later, which fixes this.";
 
-            if (rewriting || heavy)
+            if (verdict == AmdWritesVerdict.Kind.NonstopWrites)
             {
                 var detail = "AMD's External Events Utility (atieclxx.exe) "
                     + (rewriting ? "is copying itself over a file in the SYSTEM profile every second" : "is writing to the disk constantly")
@@ -93,10 +91,10 @@ namespace Feverfew.Collectors
                     : update + " Until then, use Stop AMD's constant drive writes in Repair tools.";
                 r.Find(Severity.Warning, "AMD graphics driver is writing to the drive nonstop", detail, advice);
             }
-            else if (copy == CopyState.Blocked && fixedDriver)
+            else if (verdict == AmdWritesVerdict.Kind.BlockNoLongerNeeded)
                 r.Find(Severity.Info, "Feverfew's block on AMD's constant drive writes is no longer needed", "AMD Software " + installed + " includes AMD's fix.", "Use Undo on Stop AMD's constant drive writes in Repair tools.");
-            else if (installed != null && !fixedDriver)
-                r.Find(Severity.Info, "AMD driver predates its fix for excessive drive writes", "AMD Software " + installed + " is installed. Version 26.11.1 fixes constant background writes and writes while moving or resizing windows.", "Update AMD Software if it's offered for your card.");
+            else if (verdict == AmdWritesVerdict.Kind.PredatesFix)
+                r.Find(Severity.Info, "AMD driver predates its fix for excessive drive writes", "AMD Software " + installed + " is installed, and the copy atieclxx.exe makes in the SYSTEM profile shows this PC has had the bug. Version 26.11.1 fixes constant background writes and writes while moving or resizing windows.", "Update AMD Software if it's offered for your card.");
 
             if (rate == null && copy == null)
                 s.Note("Run as administrator to check whether the AMD driver is writing to the drive constantly.");

@@ -15,6 +15,35 @@ internal static partial class Program
     private static void Diagnostics()
     {
         FastStartupResumeTests();
+        AmdWritesTests();
+    }
+
+    private static void AmdWritesTests()
+    {
+        var old = new Version(23, 20, 44);      // the user's January 2024 driver
+        var affected = new Version(26, 5, 1);   // the oldest version reported with the bug
+        var fixedVersion = new Version(26, 11, 1);
+        double busy = 600 * 1024;
+        Func<AmdWritesVerdict.Kind, string> name = k => k.ToString();
+        var k1 = AmdWritesVerdict.Decide(old, AmdWritesVerdict.CopyState.Missing, 0);
+        Check("an old driver with no writes and no copy raises no finding", k1 == AmdWritesVerdict.Kind.None, name(k1));
+        var k2 = AmdWritesVerdict.Decide(old, null, null);
+        Check("an old driver, not checked as administrator, raises no finding", k2 == AmdWritesVerdict.Kind.None, name(k2));
+        var k3 = AmdWritesVerdict.Decide(affected, AmdWritesVerdict.CopyState.Quiet, 0);
+        Check("an affected version whose copy is there but quiet says it predates the fix", k3 == AmdWritesVerdict.Kind.PredatesFix, name(k3));
+        var k4 = AmdWritesVerdict.Decide(affected, AmdWritesVerdict.CopyState.Missing, 0);
+        Check("an affected version with no writes and no copy raises no finding (no version gate: see the decision)", k4 == AmdWritesVerdict.Kind.None, name(k4));
+        foreach (var v in new[] { null, old, affected, fixedVersion })
+        {
+            var k = AmdWritesVerdict.Decide(v, AmdWritesVerdict.CopyState.Missing, busy);
+            Check("writes measured on " + (v == null ? "an unknown version" : v.ToString()) + " raise the nonstop-writes finding", k == AmdWritesVerdict.Kind.NonstopWrites, name(k));
+        }
+        var k5 = AmdWritesVerdict.Decide(old, AmdWritesVerdict.CopyState.Rewriting, null);
+        Check("a copy being rewritten raises the nonstop-writes finding whatever the version", k5 == AmdWritesVerdict.Kind.NonstopWrites, name(k5));
+        var k6 = AmdWritesVerdict.Decide(fixedVersion, AmdWritesVerdict.CopyState.Quiet, 0);
+        Check("a fixed version with a quiet copy raises no finding", k6 == AmdWritesVerdict.Kind.None, name(k6));
+        var k7 = AmdWritesVerdict.Decide(fixedVersion, AmdWritesVerdict.CopyState.Blocked, 0);
+        Check("a fixed version with Feverfew's block says the block is no longer needed", k7 == AmdWritesVerdict.Kind.BlockNoLongerNeeded, name(k7));
     }
 
     private static void FastStartupResumeTests()
