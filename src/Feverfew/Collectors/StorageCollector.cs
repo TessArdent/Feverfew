@@ -14,7 +14,7 @@ namespace Feverfew.Collectors
 
             Guard.Try(s, "Drive health", () =>
             {
-                var t = s.Table("Physical drives", "Drive", "Type", "Bus", "Size", "Health", "Temp", "Wear", "Read errors", "Power-on hours", "Firmware", "Serial");
+                var t = s.Table("Physical drives", "Drive", "Type", "Bus", "Size", "Health", "Temp", "Wear", "Written", "Read errors", "Power-on hours", "Firmware", "Serial");
                 foreach (var pair in Wmi.QueryRelated(StorageNs, "SELECT * FROM MSFT_PhysicalDisk", "MSFT_StorageReliabilityCounter"))
                 {
                     var d = pair.Key; var c = pair.Value;
@@ -27,12 +27,15 @@ namespace Feverfew.Collectors
                     long? wear = nvme != null ? nvme.PercentUsed : c?.Long("Wear");
                     long? readErrors = c?.Long("ReadErrorsUncorrected") ?? (nvme != null ? (long)nvme.MediaErrors : (long?)null);
                     long? hours = c != null && c.Long("PowerOnHours") > 0 ? c.Long("PowerOnHours") : nvme != null && nvme.PowerOnHours > 0 ? (long)nvme.PowerOnHours : (long?)null;
+                    // Only NVMe drives report this to Windows; SATA SSDs keep it in a SMART attribute Windows doesn't expose.
+                    double? written = nvme != null ? DriveWrites.FromNvme(nvme.DataUnitsWritten) : null;
                     t.Rows.Add(new[]
                     {
                         name, MediaType(d.Long("MediaType")), BusType(d.Long("BusType")), Fmt.Bytes(d.Long("Size")),
                         health == 0 ? "Healthy" : health == 1 ? "Warning" : health == 2 ? "Unhealthy" : "Unknown",
                         temp != null ? temp + " °C" : "-",
                         wear != null ? wear + "%" : "-",
+                        DriveWrites.Cell(written, hours),
                         readErrors != null ? readErrors.ToString() : "-",
                         hours != null ? hours.ToString() : "-",
                         d.Str("FirmwareVersion"), r.Private(d.Str("SerialNumber"))
@@ -49,12 +52,16 @@ namespace Feverfew.Collectors
                         r.Find(Severity.Warning, "Drive health warning: " + name, "Windows marks this drive with a health warning.", "Back up soon and check the drive with its maker's tool.");
                     if (wear >= 90)
                         r.Find(Severity.Warning, "SSD is near the end of its rated life: " + name, "Wear level is " + wear + "%.", "Plan a replacement and keep backups current.");
+                    if (wear < 90 && DriveWrites.HeavyWriting(written, hours, wear))
+                        r.Find(Severity.Info, "SSD is wearing fast because a lot is written to it: " + name,
+                            "It has used " + wear + "% of its rated life in " + hours + " power-on hours, with " + DriveWrites.Format(written.Value) + " written, about " + DriveWrites.Format(DriveWrites.PerPowerOnHour(written, hours).Value) + " per power-on hour. Normal use writes far less.",
+                            "Look for what writes constantly: Resource Monitor's Disk tab (sort by Write) shows it. Common causes are a background program or driver bug, heavy game updates or downloads, a nearly full drive, or a previous owner's use. Keep backups current.");
                     if (temp >= 70)
                         r.Find(Severity.Warning, "Drive is hot: " + name, temp + " °C during the scan.", "Improve airflow around the drive.");
                     if (c != null && c.Long("ReadErrorsUncorrected") > 0)
                         r.Find(Severity.Critical, "Uncorrected read errors on " + name, c.Str("ReadErrorsUncorrected") + " errors reported by the drive.", "Back up now and test the drive.");
                 }
-                s.Note("Wear is the drive's own estimate of how much of its rated life is used. A dash means the drive, or a driver in front of it such as Intel RST or a USB enclosure, doesn't report that value.");
+                s.Note("Wear is the drive's own estimate of how much of its rated life is used. Written is what the PC has written to the drive in its life, in decimal units (1 TB = 1,000 GB) like the TBW endurance ratings drive makers publish; compare the two to see whether wear comes from heavy writing. A dash means the drive, or a driver in front of it such as Intel RST or a USB enclosure, doesn't report that value. Only NVMe drives report Written to Windows.");
             });
 
             Guard.Try(s, "SMART failure prediction", () =>

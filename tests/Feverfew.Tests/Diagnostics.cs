@@ -17,6 +17,29 @@ internal static partial class Program
         FastStartupResumeTests();
         AmdWritesTests();
         MemorySlotTests();
+        DriveWritesTests();
+    }
+
+    private static void DriveWritesTests()
+    {
+        // The user report: a 2 TB Kingston NV3 at 5% wear after 1,120 power-on hours.
+        double thirty = 30e12;
+        var cell = DriveWrites.Cell(thirty, 1120);
+        Check("the Written cell gives decimal TB and the rate per power-on hour", cell == "30 TB (about 26.8 GB per power-on hour)", cell);
+        Check("formatting keeps one decimal below 100", DriveWrites.Format(31.8e12) == "31.8 TB" && DriveWrites.Format(512000) == "512 KB" && DriveWrites.Format(999) == "999 B", DriveWrites.Format(31.8e12));
+        Check("formatting drops decimals from 100 up", DriveWrites.Format(123.45e9) == "123 GB", DriveWrites.Format(123.45e9));
+        Check("NVMe data units are 512,000 bytes", DriveWrites.FromNvme(2) == 1024000);
+        Check("an NVMe drive reporting 0 data units shows a dash", DriveWrites.FromNvme(0) == null && DriveWrites.Cell(DriveWrites.FromNvme(0), 500) == "-");
+        Check("a drive that doesn't report writes shows a dash", DriveWrites.Cell(null, 1120) == "-");
+        Check("without power-on hours only the total shows", DriveWrites.Cell(5e12, null) == "5 TB", DriveWrites.Cell(5e12, null));
+        Check("under 24 power-on hours only the total shows", DriveWrites.Cell(50e9, 3) == "50 GB", DriveWrites.Cell(50e9, 3));
+        Check("the rate is bytes per power-on hour", DriveWrites.PerPowerOnHour(48e9, 24) == 2e9 && DriveWrites.PerPowerOnHour(1e9, 0) == null && DriveWrites.PerPowerOnHour(null, 10) == null);
+        Check("30 TB and 5% wear in 1,120 hours is heavy writing", DriveWrites.HeavyWriting(thirty, 1120, 5));
+        Check("normal use (3 TB, 5% wear, 5,000 hours) isn't heavy writing", !DriveWrites.HeavyWriting(3e12, 5000, 5));
+        Check("a high rate with little wear isn't flagged", !DriveWrites.HeavyWriting(thirty, 1120, 1));
+        Check("high wear from few writes isn't flagged", !DriveWrites.HeavyWriting(2e12, 1120, 5));
+        Check("a drive with under 100 power-on hours isn't flagged", !DriveWrites.HeavyWriting(5e12, 50, 3));
+        Check("missing writes, hours or wear isn't flagged", !DriveWrites.HeavyWriting(null, 1120, 5) && !DriveWrites.HeavyWriting(thirty, null, 5) && !DriveWrites.HeavyWriting(thirty, 1120, null));
     }
 
     private static void MemorySlotTests()
