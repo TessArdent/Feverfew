@@ -19,7 +19,8 @@ namespace Feverfew
             "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF", "00000000-0000-0000-0000-000000000000"
         };
 
-        private static readonly Regex UserPath = new Regex(@"([A-Za-z]:\\Users\\)[^\\""'<>|:*?\r\n]+", RegexOptions.Compiled);
+        // Also kernel paths such as \Device\HarddiskVolume3\Users\name, which Code Integrity events use.
+        private static readonly Regex UserPath = new Regex(@"((?:[A-Za-z]:|\\Device\\HarddiskVolume\d+)\\Users\\)[^\\""'<>|:*?\r\n]+", RegexOptions.Compiled);
         // Account SIDs (S-1-5-21-domain-rid) are unique to one PC and user. Well-known SIDs such as S-1-5-18 stay visible.
         private static readonly Regex AccountSid = new Regex(@"S-1-5-21(-\d+){3,4}", RegexOptions.Compiled);
         private static readonly Regex Email = new Regex(@"[\w.+-]+@[\w-]+(\.[\w-]+)+", RegexOptions.Compiled);

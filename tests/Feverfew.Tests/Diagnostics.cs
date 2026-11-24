@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Feverfew;
 using Feverfew.Collectors;
 
@@ -18,6 +19,76 @@ internal static partial class Program
         AmdWritesTests();
         MemorySlotTests();
         DriveWritesTests();
+        FilterDriverTests();
+    }
+
+    private static void FilterDriverTests()
+    {
+        var services = new Dictionary<string, FilterDriverAudit.ServiceInfo>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "kbdclass", new FilterDriverAudit.ServiceInfo { Exists = true, FileExists = true, File = @"C:\Windows\System32\drivers\kbdclass.sys", Company = "Microsoft Corporation", Running = true, StartMode = "System" } },
+            { "hidusbf", new FilterDriverAudit.ServiceInfo { Exists = true, FileExists = true, File = @"C:\Windows\System32\drivers\hidusbf.sys", Company = "SweetLow", Running = false, StartMode = "Manual" } },
+            { "razerfilter", new FilterDriverAudit.ServiceInfo { Exists = true, FileExists = true, Company = "Razer Inc", Running = true, StartMode = "Manual" } },
+            { "gonefile", new FilterDriverAudit.ServiceInfo { Exists = true, FileExists = false, File = @"C:\Windows\System32\drivers\gonefile.sys" } },
+        };
+        Func<string, FilterDriverAudit.ServiceInfo> lookup = n => { FilterDriverAudit.ServiceInfo i; return services.TryGetValue(n, out i) ? i : null; };
+
+        Check("filter values read from REG_MULTI_SZ, REG_SZ and nothing", FilterDriverAudit.Names(new[] { "kbdclass", " ", "hidusbf " }).SequenceEqual(new[] { "kbdclass", "hidusbf" })
+            && FilterDriverAudit.Names("hidusbf").Count == 1 && FilterDriverAudit.Names(null).Count == 0);
+
+        var classMissing = FilterDriverAudit.Classify(new[]
+        {
+            new FilterDriverAudit.Placement { Service = "kbdclass", ClassWide = true, Where = "Keyboard class", Upper = true },
+            new FilterDriverAudit.Placement { Service = "oldmacro", ClassWide = true, Where = "Keyboard class", Upper = true },
+        }, lookup);
+        Check("a class-wide filter with a missing service is listed and Microsoft's is ignored",
+            classMissing.Count == 1 && classMissing[0].Placement.Service == "oldmacro" && classMissing[0].Problem == FilterDriverAudit.Problem.MissingService, classMissing.Count.ToString());
+        var warn = FilterDriverAudit.MissingFinding(classMissing);
+        Check("a missing class-wide filter is a Warning saying every device in the class can stop", warn != null && warn.Severity == Severity.Warning && warn.Detail.Contains("every device in the Keyboard class") && warn.Detail.Contains("stop every device"));
+
+        var device = FilterDriverAudit.Classify(new[] { new FilterDriverAudit.Placement { Service = "hidusbf", ClassWide = false, Where = "USB Input Device", Upper = false } }, lookup);
+        Check("a per-device filter that isn't running is listed as not running", device.Count == 1 && device[0].Problem == FilterDriverAudit.Problem.NotRunning && FilterDriverAudit.State(device[0]) == "Not running");
+        var idle = FilterDriverAudit.NotRunningFinding(device);
+        Check("it raises an Info finding naming the device and warning against deleting it by hand", idle != null && idle.Severity == Severity.Info && idle.Detail.Contains("hidusbf on USB Input Device") && idle.Advice.Contains("own uninstaller") && idle.Advice.Contains("keyboard or mouse"));
+        Check("a per-device filter alone raises no missing-driver Warning", FilterDriverAudit.MissingFinding(device) == null);
+
+        var fileGone = FilterDriverAudit.Classify(new[] { new FilterDriverAudit.Placement { Service = "gonefile", ClassWide = false, Where = "Disk" } }, lookup);
+        Check("a filter whose service is there but file is gone is a missing driver", fileGone.Count == 1 && fileGone[0].Problem == FilterDriverAudit.Problem.MissingFile && FilterDriverAudit.MissingFinding(fileGone) != null);
+
+        var healthy = FilterDriverAudit.Classify(new[]
+        {
+            new FilterDriverAudit.Placement { Service = "kbdclass", ClassWide = true, Where = "Keyboard class" },
+            new FilterDriverAudit.Placement { Service = "razerfilter", ClassWide = false, Where = "Razer mouse" },
+        }, lookup);
+        Check("a running third-party filter is listed with no finding", healthy.Count == 1 && healthy[0].Problem == FilterDriverAudit.Problem.None
+            && FilterDriverAudit.MissingFinding(healthy) == null && FilterDriverAudit.NotRunningFinding(healthy) == null);
+
+        // Memory integrity blockers, from Code Integrity events.
+        var t0 = new DateTime(2026, 11, 20, 9, 0, 0);
+        var events = new[]
+        {
+            new KeyValuePair<DateTime, string>(t0, @"\Device\HarddiskVolume3\Windows\System32\drivers\hidusbf.sys"),
+            new KeyValuePair<DateTime, string>(t0.AddDays(1), @"\Device\HarddiskVolume3\Windows\System32\drivers\HIDUSBF.SYS"),
+            new KeyValuePair<DateTime, string>(t0, @"\SystemRoot\System32\drivers\oldtool.sys"),
+        };
+        var blockers = FilterDriverAudit.Blockers(events, p => p.IndexOf("hidusbf", StringComparison.OrdinalIgnoreCase) >= 0);
+        Check("blockers are one per driver file, newest report kept", blockers.Count == 2 && blockers[0].File.Equals("HIDUSBF.SYS", StringComparison.OrdinalIgnoreCase) && blockers[0].Last == t0.AddDays(1) && blockers[0].Installed && !blockers[1].Installed);
+        var mi = FilterDriverAudit.BlockersFinding(false, blockers);
+        Check("with memory integrity off, an installed blocker is named in an Info finding", mi != null && mi.Severity == Severity.Info && mi.Title.Contains("HIDUSBF.SYS") && !mi.Title.Contains("oldtool") && mi.Advice.Contains("own uninstaller"));
+        Check("no blockers logged: no finding", FilterDriverAudit.BlockersFinding(false, new List<FilterDriverAudit.Blocker>()) == null);
+        Check("only uninstalled blockers: no finding", FilterDriverAudit.BlockersFinding(false, blockers.Skip(1).ToList()) == null);
+        Check("memory integrity on or unknown: no finding", FilterDriverAudit.BlockersFinding(true, blockers) == null && FilterDriverAudit.BlockersFinding(null, blockers) == null);
+        Check("kernel paths map to Windows paths", FilterDriverAudit.Win32Path(@"\Device\HarddiskVolume3\Windows\System32\drivers\x.sys", @"C:\Windows") == @"C:\Windows\System32\drivers\x.sys"
+            && FilterDriverAudit.Win32Path(@"\SystemRoot\System32\drivers\x.sys", @"C:\Windows") == @"C:\Windows\System32\drivers\x.sys"
+            && FilterDriverAudit.Win32Path(@"\??\C:\Tools\x.sys", @"C:\Windows") == @"C:\Tools\x.sys"
+            && FilterDriverAudit.Win32Path(@"\Device\HarddiskVolume5\Tools\x.sys", @"C:\Windows") == null);
+
+        var report = new Report();
+        var section = report.NewSection("Filter drivers and memory integrity");
+        section.Table("Drivers not compatible with memory integrity", "Driver", "Path").Rows.Add(new[] { "x.sys", @"\Device\HarddiskVolume3\Users\alex\Downloads\x.sys" });
+        Redactor.Apply(report);
+        var cell = report.Sections[0].Tables[0].Rows[0][1];
+        Check("the redactor hides the user folder in kernel paths", cell == @"\Device\HarddiskVolume3\Users\" + Redactor.Hidden + @"\Downloads\x.sys", cell);
     }
 
     private static void DriveWritesTests()

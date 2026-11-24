@@ -9,7 +9,7 @@ A Windows diagnostics tool (WPF, .NET Framework 4.8). It collects hardware and s
 
 ## Key folders
 
-- `src/Feverfew/`: the app. `Program.cs` is the entry point and CLI, `MainWindow.xaml.cs` the UI, `Scanner.cs` runs `src/Feverfew/Collectors/`, `HtmlReport.cs` writes the report, `Fixes.cs` holds the fixes.
+- `src/Feverfew/`: the app. `Program.cs` is the entry point and CLI, `MainWindow.xaml.cs` the UI, `Scanner.cs` runs `src/Feverfew/Collectors/`, `HtmlReport.cs` writes the report, `Fixes.cs` holds the fixes. `src/Feverfew/Collectors/FilterCollector.cs` lists device filter drivers and memory integrity blockers (read-only: Feverfew never removes drivers).
 - `src/Feverfew/Updater.cs` and `src/Feverfew/SignatureCheck.cs`: the update check and download.
 - `src/Feverfew/Trust/`: the publisher's code-signing root certificate(s), embedded in the exe.
 - `tests/Feverfew.Tests/`: a headless console test exe that prints PASS or FAIL per case. It links app source files; it doesn't reference the WPF project. To test a collector's logic, put it in a pure file (no WMI, registry or event log), such as `src/Feverfew/Collectors/FastStartupResume.cs`, link that file in the test `.csproj`, and test it in `tests/Feverfew.Tests/Diagnostics.cs`.

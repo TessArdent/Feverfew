@@ -321,7 +321,7 @@ namespace Feverfew.Collectors
             s.Note("Other third-party kernel drivers lists drivers that belong to no device, such as anti-cheat, antivirus, VPN and backup software. They're a common cause of blue screens, so compare them with a crash dump's faulting driver.");
         }
 
-        private static string DriverPath(string raw, string windows)
+        internal static string DriverPath(string raw, string windows)
         {
             if (string.IsNullOrWhiteSpace(raw)) return null;
             var p = raw.Trim().Trim('"');

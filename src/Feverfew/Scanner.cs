@@ -60,6 +60,7 @@ namespace Feverfew
                 new Step("Checking the battery", HardwareCollector.Battery),
                 new Step("Checking devices", HardwareCollector.Devices),
                 new Step("Listing third-party drivers", HardwareCollector.Drivers, 120),
+                new Step("Checking filter drivers and memory integrity", FilterCollector.Collect, 90),
                 new Step("Testing the network", NetworkCollector.Collect),
                 new Step("Checking settings that affect games", GamingCollector.Settings),
                 new Step("Measuring connection quality for games", GamingCollector.Network, 90),
