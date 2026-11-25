@@ -27,6 +27,9 @@ namespace Feverfew
         private TaskCompletionSource<bool> question;
         private readonly System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Fix, TextBlock>> statusLines = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Fix, TextBlock>>();
         private bool tipsLoaded;
+        private bool scanStarted;
+        private UpdateInfo launchUpdate;
+        private string verifiedSetup;
 
         public MainWindow(ScanOptions options, bool limited)
         {
@@ -42,6 +45,10 @@ namespace Feverfew
             AccessText.Foreground = (Brush)FindResource(limited ? "WarningText" : "Accent");
             AccessDetail.Text = limited ? "Some checks will be skipped" : "Full scan available";
             LimitedBar.Visibility = limited ? Visibility.Visible : Visibility.Collapsed;
+            AutoUpdate.IsChecked = UpdateSettings.AutoUpdate;
+            NotifyOnLaunch.IsChecked = UpdateSettings.NotifyOnLaunch || AutoUpdate.IsChecked == true;
+            NotifyOnLaunch.IsEnabled = AutoUpdate.IsChecked != true;
+            Loaded += async (s, e) => await CheckAtLaunch();
 
             foreach (var fix in Fixes.All) RepairList.Children.Add(BuildFixRow(fix, RepairStatus, "Run"));
             foreach (var fix in Fixes.Gaming) GamingList.Children.Add(BuildFixRow(fix, GamingStatus, "Apply"));
@@ -124,6 +131,7 @@ namespace Feverfew
         private async void Run_Click(object sender, RoutedEventArgs e)
         {
             options.IncludeIdentifiers = Identifiers.IsChecked == true;
+            scanStarted = true;
             RunButton.IsEnabled = false;
             UpdateButton.IsEnabled = false;
             Identifiers.IsEnabled = false;
@@ -279,7 +287,108 @@ namespace Feverfew
         private void ShowFile_Click(object sender, RoutedEventArgs e) { Process.Start("explorer.exe", "/select,\"" + result.HtmlPath + "\""); }
         private void Repository_Click(object sender, RoutedEventArgs e) { OpenUnelevated("https://github.com/" + Updater.Repository); }
 
-        private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+        private void UpdateSettings_Click(object sender, RoutedEventArgs e)
+        {
+            bool auto = AutoUpdate.IsChecked == true;
+            if (auto) NotifyOnLaunch.IsChecked = true; // installing at launch means checking at launch
+            NotifyOnLaunch.IsEnabled = !auto;
+            try
+            {
+                UpdateSettings.AutoUpdate = auto;
+                UpdateSettings.NotifyOnLaunch = NotifyOnLaunch.IsChecked == true;
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus.Text = "Couldn't save the update setting: " + ex.Message;
+            }
+        }
+
+        // Runs once when the window opens, only if the user turned on a launch check. A failed check stays quiet.
+        private async Task CheckAtLaunch()
+        {
+            bool notify = UpdateSettings.NotifyOnLaunch, auto = UpdateSettings.AutoUpdate;
+            if (!notify && !auto) return;
+            bool inPlace = Updater.CanInstallInPlace();
+            UpdateInfo info;
+            try { info = await Task.Run(() => Updater.Check(Updater.CurrentVersion())); }
+            catch (Exception) { return; }
+
+            var action = UpdatePlan.Decide(notify, auto, info, inPlace);
+            if (action == LaunchAction.Nothing) return;
+            launchUpdate = info;
+            if (action == LaunchAction.Notify)
+            {
+                ShowUpdateBar("Feverfew " + info.Latest + " is available", "You have " + info.Current + ".", "Update");
+                return;
+            }
+
+            ShowUpdateBar("Updating Feverfew to " + info.Latest, "Downloading it and checking the publisher's signature...", null);
+            UpdateButton.IsEnabled = false;
+            try
+            {
+                verifiedSetup = await Task.Run(() => Updater.Download(info));
+            }
+            catch (UpdateRefusedException ex)
+            {
+                ShowUpdateBar("Feverfew " + info.Latest + " wasn't installed", ex.Message, "Open release page");
+                UpdateBarButton.Tag = ex.PageUrl;
+                return;
+            }
+            catch (Exception ex)
+            {
+                ShowUpdateBar("Feverfew " + info.Latest + " is available", "The automatic download failed: " + ex.Message, "Update");
+                return;
+            }
+            finally
+            {
+                if (RunButton.IsEnabled) UpdateButton.IsEnabled = true;
+            }
+
+            // Don't close the window under a scan the user started while the download ran.
+            if (scanStarted)
+            {
+                ShowUpdateBar("Feverfew " + info.Latest + " is ready to install", "It's downloaded and signed by the publisher. Feverfew will close, update and reopen.", "Install now");
+                return;
+            }
+            InstallSilently();
+        }
+
+        private void ShowUpdateBar(string title, string text, string button)
+        {
+            UpdateBarTitle.Text = title;
+            UpdateBarText.Text = text;
+            UpdateBarButton.Content = button;
+            UpdateBarButton.Tag = null;
+            UpdateBarButton.Visibility = button == null ? Visibility.Collapsed : Visibility.Visible;
+            UpdateBar.Visibility = Visibility.Visible;
+        }
+
+        // The installer reopens Feverfew when it's done (the relaunch entry in installer\setup.iss).
+        private void InstallSilently()
+        {
+            Process.Start(new ProcessStartInfo(verifiedSetup, UpdatePlan.SilentArguments) { UseShellExecute = true });
+            Close();
+        }
+
+        private async void UpdateBar_Click(object sender, RoutedEventArgs e)
+        {
+            var page = UpdateBarButton.Tag as string;
+            if (page != null) { OpenUnelevated(page); return; }
+            if (!RunButton.IsEnabled) { UpdateBarText.Text = "Wait for the scan to finish, then update."; return; }
+            if (verifiedSetup != null)
+            {
+                InstallSilently();
+                return;
+            }
+            UpdateBar.Visibility = Visibility.Collapsed;
+            NavUpdates.IsChecked = true;
+            await RunUpdate(launchUpdate);
+        }
+
+        private async void CheckUpdates_Click(object sender, RoutedEventArgs e) { await RunUpdate(null); }
+
+        /// <summary>The interactive update: asks first, then downloads, verifies and opens the installer's wizard.</summary>
+        private async Task RunUpdate(UpdateInfo known)
         {
             RunButton.IsEnabled = false;
             UpdateButton.IsEnabled = false;
@@ -287,7 +396,7 @@ namespace Feverfew
             try
             {
                 var current = Updater.CurrentVersion();
-                var info = await Task.Run(() => Updater.Check(current));
+                var info = known ?? await Task.Run(() => Updater.Check(current));
                 if (!info.IsNewer)
                 {
                     UpdateStatus.Text = "You have the latest version.";

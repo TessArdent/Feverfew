@@ -37,7 +37,7 @@ The report comes as an `.html` file to read and a `.json` file with the same con
 
 ## Privacy
 
-- **Nothing is uploaded.** Feverfew has no telemetry. A scan's only network traffic is the connection tests: pings to the router and to `1.1.1.1` (about 20 each, to measure latency), and a name lookup for `www.microsoft.com`. Use `--no-network` to skip it. **Check for updates** contacts GitHub only when you press it, and sends no report data.
+- **Nothing is uploaded.** Feverfew has no telemetry. A scan's only network traffic is the connection tests: pings to the router and to `1.1.1.1` (about 20 each, to measure latency), and a name lookup for `www.microsoft.com`. Use `--no-network` to skip it. **Check for updates** contacts GitHub only when you press it, or when Feverfew opens if you turn on a launch check on the Updates page. It sends no report data.
 - **Identifiers are hidden by default.** Serial numbers, the system UUID, computer and user names, Windows account IDs, drive labels, MAC addresses, public IP addresses, and email addresses in log messages become `[hidden]`. Tick the checkbox to keep them, for example for a warranty claim.
 - **Feverfew never reads** product keys, BitLocker recovery keys, passwords, browser data or personal files. It checks only whether a BitLocker drive has a recovery password, never the password itself.
 - **Reports still say a lot about a PC.** The installed programs list, for one, is included even with identifiers hidden. Only send a report to someone you trust, and glance through it first if that matters to you.
@@ -78,6 +78,13 @@ The report comes as an `.html` file to read and a `.json` file with the same con
 - it carries an intact Authenticode signature from a code-signing certificate issued by the publisher's own root CA, whose public certificate is built into Feverfew. This protects against a changed release, because a changed release can't carry that signature.
 
 If either check fails, Feverfew deletes the file, says why and links to the release page. The root isn't trusted by Windows, so Windows doesn't show the installer as signed by a known publisher. Feverfew does its own check against the built-in root.
+
+On the Updates page you can also turn on:
+
+- **Check for updates when Feverfew opens**: a bar on the Diagnostics page says when a newer version is out.
+- **Install updates automatically**: Feverfew downloads the update when it opens, runs the same two checks, installs it without the wizard and reopens. It waits if you've started a scan. If Feverfew isn't the per-user install for your account, it tells you about the update instead.
+
+Both start off, and they're saved per Windows account.
 
 Versions up to 1.3.0 check only the hash, so the first signed release installs through them as before. Every later version refuses unsigned updates. To ship an update, publish a GitHub release with a **signed** `setup.exe` asset and a tag like `v1.4.0`.
 

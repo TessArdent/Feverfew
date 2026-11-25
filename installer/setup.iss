@@ -38,8 +38,15 @@ Name: "{autodesktop}\Feverfew"; Filename: "{app}\Feverfew.exe"; Tasks: desktopic
 
 [Run]
 Filename: "{app}\Feverfew.exe"; Description: "Open Feverfew now"; Flags: nowait postinstall skipifsilent
+; Feverfew's automatic update runs setup with /SILENT /relaunch=yes (UpdatePlan.SilentArguments) and closes, so reopen it.
+Filename: "{app}\Feverfew.exe"; Flags: nowait; Check: RelaunchAfterUpdate
 
 [Code]
+function RelaunchAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:relaunch|no}') = 'yes');
+end;
+
 function InitializeSetup(): Boolean;
 begin
   Result := IsDotNetInstalled(net48, 0);

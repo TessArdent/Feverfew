@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -12,17 +11,6 @@ using System.Web.Script.Serialization;
 
 namespace Feverfew
 {
-    public sealed class UpdateInfo
-    {
-        public Version Current;
-        public Version Latest;
-        public string PageUrl;
-        public string DownloadUrl;
-        public string Sha256;
-        public bool IsNewer { get { return Latest > Current; } }
-        public bool CanDownload { get { return DownloadUrl != null && Sha256 != null; } }
-    }
-
     /// <summary>A downloaded update that failed a check. It has been deleted; the message says why.</summary>
     public sealed class UpdateRefusedException : Exception
     {
@@ -30,20 +18,19 @@ namespace Feverfew
         public UpdateRefusedException(string message, string pageUrl) : base(message) { PageUrl = pageUrl; }
     }
 
-    /// <summary>Checks the project's GitHub releases. Only runs when the user asks.</summary>
+    /// <summary>Checks the project's GitHub releases: when the user asks, or at launch if they turned that on (<see cref="UpdateSettings"/>).</summary>
     public static class Updater
     {
-        public const string Repository = "TessArdent/feverfew";
-        private const string AssetName = "setup.exe";
+        public const string Repository = UpdatePlan.Repository;
+        private const string AssetName = UpdatePlan.AssetName;
         private static readonly string LatestApi = "https://api.github.com/repos/" + Repository + "/releases/latest";
-        private static readonly string DownloadPrefix = "https://github.com/" + Repository + "/releases/download/";
 
         public static Version CurrentVersion()
         {
             return Normalize(Assembly.GetExecutingAssembly().GetName().Version);
         }
 
-        private static Version Normalize(Version v) { return new Version(v.Major, v.Minor, Math.Max(v.Build, 0)); }
+        private static Version Normalize(Version v) { return UpdatePlan.Normalize(v); }
 
         private static WebClient Client()
         {
@@ -62,26 +49,7 @@ namespace Feverfew
             }
 
             var release = (Dictionary<string, object>)new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(body);
-            var info = new UpdateInfo
-            {
-                Current = Normalize(current),
-                Latest = Normalize(new Version(((string)release["tag_name"]).TrimStart('v', 'V'))),
-                PageUrl = (string)release["html_url"]
-            };
-
-            var assets = ((IEnumerable)release["assets"]).Cast<Dictionary<string, object>>();
-            var setup = assets.FirstOrDefault(a => (string)a["name"] == AssetName);
-            if (setup != null)
-            {
-                var url = (string)setup["browser_download_url"];
-                object digest;
-                if (url.StartsWith(DownloadPrefix, StringComparison.Ordinal) && setup.TryGetValue("digest", out digest) && digest is string && ((string)digest).StartsWith("sha256:", StringComparison.Ordinal))
-                {
-                    info.DownloadUrl = url;
-                    info.Sha256 = ((string)digest).Substring("sha256:".Length);
-                }
-            }
-            return info;
+            return UpdatePlan.ParseRelease(release, current);
         }
 
         /// <summary>
@@ -136,6 +104,34 @@ namespace Feverfew
         {
             var expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Feverfew") + "\\";
             return Assembly.GetExecutingAssembly().Location.StartsWith(expected, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// The update toggles, kept per user under HKCU\Software\Feverfew. Both start off, so Feverfew contacts GitHub
+    /// only when asked until the user turns one on. Automatic updates imply the launch check.
+    /// </summary>
+    public static class UpdateSettings
+    {
+        private const string Key = @"Software\Feverfew";
+
+        public static bool NotifyOnLaunch { get { return Read("NotifyOnLaunch"); } set { Write("NotifyOnLaunch", value); } }
+        public static bool AutoUpdate { get { return Read("AutoUpdate"); } set { Write("AutoUpdate", value); } }
+
+        private static bool Read(string name)
+        {
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(Key))
+                    return key != null && key.GetValue(name) is int && (int)key.GetValue(name) != 0;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static void Write(string name, bool value)
+        {
+            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key))
+                key.SetValue(name, value ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
         }
     }
 }

@@ -55,6 +55,17 @@
                         <TextBlock Text="Diagnostics" Style="{StaticResource PageTitle}" />
                         <TextBlock Text="Checks this PC's hardware, firmware, drivers and recent crashes, then saves a report you can send to whoever is helping you. Nothing is uploaded." Style="{StaticResource Secondary}" Margin="0,0,0,16" />
 
+                        <Border x:Name="UpdateBar" Visibility="Collapsed" Background="{StaticResource InfoFill}" CornerRadius="8" Padding="16,12" Margin="0,0,0,14">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock x:Name="UpdateBarTitle" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="UpdateBarText" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="UpdateBarButton" Grid.Column="1" Click="UpdateBar_Click" />
+                            </Grid>
+                        </Border>
+
                         <Border x:Name="LimitedBar" Visibility="Collapsed" Background="{StaticResource InfoFill}" CornerRadius="8" Padding="16,12" Margin="0,0,0,14">
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -135,7 +146,7 @@
                 <ScrollViewer x:Name="UpdatesPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
                     <StackPanel Margin="28,12,32,32" MaxWidth="1000">
                         <TextBlock Text="Updates and about" Style="{StaticResource PageTitle}" />
-                        <TextBlock Text="Feverfew only contacts GitHub when you press Check for updates." Style="{StaticResource Secondary}" Margin="0,0,0,16" />
+                        <TextBlock Text="Feverfew contacts GitHub only when you press Check for updates, or when it opens if you turn that on below. It installs only updates signed by its publisher." Style="{StaticResource Secondary}" TextWrapping="Wrap" Margin="0,0,0,16" />
                         <Border Style="{StaticResource Card}">
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -145,6 +156,13 @@
                                 </StackPanel>
                                 <Button x:Name="UpdateButton" Grid.Column="1" Content="Check for updates" Style="{StaticResource AccentButton}" Click="CheckUpdates_Click" />
                             </Grid>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <CheckBox x:Name="NotifyOnLaunch" Content="Check for updates when Feverfew opens, and tell me if there is one" Click="UpdateSettings_Click" />
+                                <CheckBox x:Name="AutoUpdate" Content="Install updates automatically when Feverfew opens" Margin="0,10,0,0" Click="UpdateSettings_Click" />
+                                <TextBlock Text="An automatic update is downloaded, checked against the publisher's signature, installed without a wizard, and Feverfew reopens. It waits if you've started a scan, and falls back to telling you when Feverfew isn't installed for your account." Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="28,4,0,0" />
+                            </StackPanel>
                         </Border>
                         <Border Style="{StaticResource Card}" Margin="0,12,0,0">
                             <Grid>

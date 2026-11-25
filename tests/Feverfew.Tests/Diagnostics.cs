@@ -20,6 +20,7 @@ internal static partial class Program
         MemorySlotTests();
         DriveWritesTests();
         FilterDriverTests();
+        UpdateTests();
     }
 
     private static void FilterDriverTests()
