@@ -151,7 +151,7 @@
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                 <StackPanel Margin="0,0,16,0">
                                     <TextBlock Text="Created by TessArdent" Style="{StaticResource CardTitle}" />
-                                    <TextBlock Text="Open source and free to use and change under the MIT License." Style="{StaticResource Caption}" Margin="0,2,0,0" />
+                                    <TextBlock Text="Proprietary. All rights reserved. Free for your own personal diagnostic use; see LICENSE.txt in the install folder." Style="{StaticResource Caption}" Margin="0,2,0,0" />
                                 </StackPanel>
                                 <Button Grid.Column="1" Content="View on GitHub" Click="Repository_Click" />
                             </Grid>
